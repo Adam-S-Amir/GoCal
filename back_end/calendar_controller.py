@@ -1,5 +1,5 @@
 import datetime
-from google_service import get_calendar_service
+from back_end.google_service import get_calendar_service
 
 def list_upcoming_events(tokens, max_results=5):
     """Fetches the next N upcoming events from the primary calendar."""

@@ -1,8 +1,8 @@
 import os
 from flask import Flask, redirect, request, session, jsonify
 from dotenv import load_dotenv
-from google_service import get_oauth_flow
-from calendar_controller import list_upcoming_events
+from back_end.google_service import get_oauth_flow
+from back_end.calendar_controller import list_upcoming_events
 
 # Allow HTTP for local testing
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
