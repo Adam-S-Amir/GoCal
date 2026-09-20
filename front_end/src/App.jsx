@@ -1,5 +1,9 @@
 import React, { useState, useRef, useEffect } from "react";
 
+// In production this is set at build time on Render to https://api.gocal.us.
+// Locally it's empty, so requests stay relative and hit the Vite dev proxy.
+const API_BASE = import.meta.env.VITE_API_BASE || "";
+
 function App() {
   const [currentScreen, setCurrentScreen] = useState("home");
   const [messages, setMessages] = useState([
@@ -7,7 +11,9 @@ function App() {
   ]);
   const [inputValue, setInputValue] = useState("");
   const [isSnackDisabled, setIsSnackDisabled] = useState(false);
-  
+  const [isSending, setIsSending] = useState(false);
+  const [needsCalendarAuth, setNeedsCalendarAuth] = useState(false);
+
   const preferencesRef = useRef(null);
   const chatMessagesRef = useRef(null);
 
@@ -39,19 +45,53 @@ function App() {
     }
   }, [currentScreen]);
 
-  const handleSendMessage = () => {
-    if (inputValue.trim() === "") return;
+  const handleSendMessage = async () => {
+    const text = inputValue.trim();
+    if (text === "" || isSending) return;
 
-    const userMessage = { sender: "user", text: inputValue };
+    const userMessage = { sender: "user", text };
     setMessages((prev) => [...prev, userMessage]);
     setInputValue("");
+    setIsSending(true);
 
-    setTimeout(() => {
+    try {
+      // Same-origin call — the Vite dev proxy forwards this to Flask on
+      // :5000, so the OAuth session cookie is sent automatically.
+      const res = await fetch(`${API_BASE}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ message: text }),
+      });
+
+      if (res.status === 401) {
+        setNeedsCalendarAuth(true);
+        setMessages((prev) => [
+          ...prev,
+          { sender: "ai", text: "You'll need to connect your Google Calendar first — use the button below." },
+        ]);
+        return;
+      }
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setMessages((prev) => [
+          ...prev,
+          { sender: "ai", text: `Something went wrong: ${data.error || "unknown error"}` },
+        ]);
+        return;
+      }
+
+      setMessages((prev) => [...prev, { sender: "ai", text: data.reply }]);
+    } catch (err) {
       setMessages((prev) => [
         ...prev,
-        { sender: "ai", text: `Got it! I am organizing "${userMessage.text}" into your Google Calendar right now.` }
+        { sender: "ai", text: "Couldn't reach the server. Is the Flask backend running on port 5000?" },
       ]);
-    }, 1000);
+    } finally {
+      setIsSending(false);
+    }
   };
 
   const handleKeyPress = (e) => {
@@ -235,7 +275,22 @@ function App() {
                   </div>
                 </div>
               ))}
+              {isSending && (
+                <div className="message-row ai-row">
+                  <div className="message-bubble ai-bubble">
+                    <p>Callie is thinking…</p>
+                  </div>
+                </div>
+              )}
             </div>
+
+            {needsCalendarAuth && (
+              <div className="chat-input-area" style={{ justifyContent: "center" }}>
+                <a href={`${API_BASE}/login`} className="btn-primary" style={{ textDecoration: "none", textAlign: "center" }}>
+                  Connect Google Calendar
+                </a>
+              </div>
+            )}
 
             <div className="chat-input-area">
               <input
@@ -245,8 +300,9 @@ function App() {
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyPress={handleKeyPress}
+                disabled={isSending}
               />
-              <button type="button" className="btn-send" onClick={handleSendMessage}>
+              <button type="button" className="btn-send" onClick={handleSendMessage} disabled={isSending}>
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                 </svg>

@@ -1,23 +1,50 @@
 import os
-from flask import Flask, redirect, request, session, jsonify, send_from_directory
+from flask import Flask, redirect, request, session, jsonify
+from flask_cors import CORS
+from werkzeug.middleware.proxy_fix import ProxyFix
 from dotenv import load_dotenv
 from google_service import get_oauth_flow
 from calendar_controller import list_upcoming_events
+# Import your AI assistant function (adjust function/file name if yours is named differently)
 from ai_assistant import process_prompt
-
-# Allow HTTP for local testing
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 load_dotenv()
 
-FRONTEND_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'front_end', 'dist'))
-app = Flask(__name__, static_folder=FRONTEND_FOLDER, static_url_path="")
+IS_PRODUCTION = os.getenv("FLASK_ENV") == "production"
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
+if not IS_PRODUCTION:
+    # Only needed for local http:// testing. Never set this in production —
+    # OAuth over plain HTTP is what it's disabling protection against.
+    os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
+app = Flask(__name__)
 app.secret_key = os.getenv("SESSION_SECRET", "dev_secret_key")
 
+# Render terminates TLS and forwards over plain HTTP internally. Without
+# ProxyFix, Flask thinks every request is http:// and generates http://
+# redirect/callback URLs, which Google will reject since only the https://
+# callback is registered.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
-# -------------------------------------------------------------------
-# AUTH & API ENDPOINTS
-# -------------------------------------------------------------------
+# Frontend (gocal.us) and backend (api.gocal.us) are different subdomains,
+# so this is a cross-origin setup. CORS with credentials + a cookie domain
+# scoped to the parent domain is what lets the session cookie flow between
+# them. Locally, both browser tabs are on localhost so this has no effect.
+CORS(app, supports_credentials=True, origins=[FRONTEND_URL])
+
+app.config.update(
+    SESSION_COOKIE_SECURE=IS_PRODUCTION,      # cookie only sent over https in prod
+    SESSION_COOKIE_SAMESITE="None" if IS_PRODUCTION else "Lax",  # "None" required for cross-subdomain
+    SESSION_COOKIE_DOMAIN=os.getenv("COOKIE_DOMAIN"),  # e.g. ".gocal.us" in production, unset locally
+)
+
+@app.route('/')
+def home():
+    if 'tokens' in session:
+        return 'Authenticated! Go to <a href="/events">/events</a> to see upcoming calendar items.'
+    return 'Not logged in. Go to <a href="/login">/login</a> to authorize Google Calendar.'
+
 @app.route('/login')
 def login():
     flow = get_oauth_flow()
@@ -49,7 +76,10 @@ def callback():
         'access_token': creds.token,
         'refresh_token': creds.refresh_token,
     }
-    return redirect('/')
+    # Send the browser back to the frontend's chat screen. Locally this is
+    # Vite's dev server; in production it's the static site Render hosts at
+    # gocal.us (a different subdomain from the api.gocal.us backend).
+    return redirect(FRONTEND_URL)
 
 @app.route('/events')
 def get_events():
@@ -62,6 +92,7 @@ def get_events():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# NEW: Gemini Chat & Action Endpoint
 @app.route('/api/chat', methods=['POST'])
 def chat():
     if 'tokens' not in session:
@@ -87,16 +118,7 @@ def reset_chat():
     session.pop('chat_history', None)
     return jsonify({'ok': True})
 
-
-# -------------------------------------------------------------------
-# REACT CATCH-ALL ROUTE (Serves frontend for all non-API paths)
-# -------------------------------------------------------------------
-@app.route("/", defaults={"path": ""})
-@app.route("/<path:path>")
-def serve_react(path):
-    if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
-        return send_from_directory(app.static_folder, path)
-    return send_from_directory(app.static_folder, "index.html")
-
 if __name__ == '__main__':
-    app.run(port=5000, debug=True)
+    # Local dev only. In production this file is run via gunicorn, e.g.:
+    #   gunicorn -w 2 -b 127.0.0.1:5000 app:app
+    app.run(port=5000, debug=not IS_PRODUCTION)
