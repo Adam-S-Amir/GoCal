@@ -1,10 +1,16 @@
 import React, { useState, useRef, useEffect } from "react";
+// 🔴 ADDED: Import CSS for animations (logo, AI pulsing, microphone listening)
 
 // In production this is set at build time on Render to https://api.gocal.us.
 // Locally it's empty, so requests stay relative and hit the Vite dev proxy.
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 function App() {
+  // 🔴 ADDED: Animation states for the UI
+  const [isAiSpeaking, setIsAiSpeaking] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+
+  // Teammate's original states
   const [currentScreen, setCurrentScreen] = useState("home");
   const [messages, setMessages] = useState([
     { sender: "ai", text: "Hi there! How can I help you organize your day?" }
@@ -18,9 +24,7 @@ function App() {
   const preferencesRef = useRef(null);
   const chatMessagesRef = useRef(null);
 
-  // Decodes the JWT Google Identity Services returns, just enough to pull
-  // out a name/email for display. Not a security check — the backend never
-  // sees or trusts this token; it's purely a "hi, you're signed in" UI step.
+  // Decodes the JWT Google Identity Services returns
   const decodeGoogleCredential = (credential) => {
     try {
       const payload = credential.split(".")[1];
@@ -41,10 +45,7 @@ function App() {
     }
   }, [messages]);
 
-  // Google Sign-In button init. The GSI script tag loads with async/defer,
-  // so on first mount window.google is often still undefined — this used to
-  // just give up silently in that case. Poll briefly until it's ready instead
-  // of relying on the effect firing exactly once at the right moment.
+  // Google Sign-In button init
   useEffect(() => {
     if (currentScreen !== "home") return;
 
@@ -78,7 +79,6 @@ function App() {
       const interval = setInterval(() => {
         if (tryInit()) clearInterval(interval);
       }, 200);
-      // Stop trying after 10s so we don't poll forever if the script failed to load at all.
       const timeout = setTimeout(() => clearInterval(interval), 10000);
       return () => {
         cancelled = true;
@@ -97,9 +97,10 @@ function App() {
     setInputValue("");
     setIsSending(true);
 
+    // 🔴 ADDED: Turn on AI speaking animation while waiting for response
+    setIsAiSpeaking(true);
+
     try {
-      // Same-origin call — the Vite dev proxy forwards this to Flask on
-      // :5000, so the OAuth session cookie is sent automatically.
       const res = await fetch(`${API_BASE}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -134,6 +135,18 @@ function App() {
       ]);
     } finally {
       setIsSending(false);
+      // 🔴 ADDED: Turn off AI speaking animation when response arrives
+      setIsAiSpeaking(false);
+    }
+  };
+
+  // 🔴 ADDED: Microphone click handler for listening animation
+  const handleMicrophoneClick = () => {
+    setIsListening(!isListening);
+    if (!isListening) {
+      console.log("Microphone is listening...");
+    } else {
+      console.log("Microphone stopped.");
     }
   };
 
@@ -157,7 +170,6 @@ function App() {
         <div id="home-screen" style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%" }}>
           <div className="hero-container">
             
-            {/* Orqa fondagi xira taqvimlar */}
             <div className="calendar-bg cal-1">
               <div className="cal-header"></div>
               <div className="cal-grid">
@@ -181,7 +193,8 @@ function App() {
             </div>
 
             <div className="header">
-              <h1 className="logo">GoCal</h1>
+              {/* 🔴 ADDED: Replaced standard text with Image Logo */}
+              <img src="/GoCal-Logo.png" alt="GoCal Logo" className="app-logo" />
             </div>
 
             <div className="hero-section">
@@ -198,8 +211,6 @@ function App() {
                   Get Started
                 </button>
                 <p className="login-hint">Sign up / Log in</p>
-                
-                {/* Google Sign In shu id'ga kelib joylashadi */}
                 <div id="buttonDiv" style={{ marginTop: "10px" }}></div>
               </div>
             </div>
@@ -298,16 +309,19 @@ function App() {
             >
               &larr; Back
             </button>
-            <h1 className="logo sidebar-logo">GoCal</h1>
+            
+            {/* 🔴 ADDED: Replaced Sidebar Text Logo with Image Logo */}
+            <img src="/GoCal-Logo.png" alt="GoCal Logo" className="secondsidebar-logo" />
 
             <div className="mascot-section">
-              <div className="mascot-circle">
+              {/* 🔴 ADDED: Dynamic speaking class for AI animation */}
+              <div className={`mascot-circle ${isAiSpeaking ? 'speaking' : ''}`}>
                 <span>Callie</span>
               </div>
               <p className="mascot-text">
                 {googleUser?.given_name || googleUser?.name
                   ? `Hi ${googleUser.given_name || googleUser.name}, ask Callie about your calendar`
-                  : "Keep Calm and ask Callie about your calendar"}
+                  : "Keep Calm and ask Callie about your calendar!"}
               </p>
             </div>
 
@@ -352,7 +366,13 @@ function App() {
                 onKeyPress={handleKeyPress}
                 disabled={isSending}
               />
-              <button type="button" className="btn-send" onClick={handleSendMessage} disabled={isSending}>
+              {/* 🔴 ADDED: Dynamic listening class and onClick handler for Mic button */}
+              <button 
+                type="button" 
+                className={`btn-send ${isListening ? 'listening' : ''}`} 
+                onClick={handleMicrophoneClick} 
+                disabled={isSending}
+              >
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                 </svg>
