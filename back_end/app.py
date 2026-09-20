@@ -1,8 +1,10 @@
 import os
 from flask import Flask, redirect, request, session, jsonify
 from dotenv import load_dotenv
-from back_end.google_service import get_oauth_flow
-from back_end.calendar_controller import list_upcoming_events
+from google_service import get_oauth_flow
+from calendar_controller import list_upcoming_events
+# Import your AI assistant function (adjust function/file name if yours is named differently)
+from ai_assistant import process_prompt
 
 # Allow HTTP for local testing
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
@@ -59,6 +61,25 @@ def get_events():
     try:
         events = list_upcoming_events(session['tokens'])
         return jsonify(events)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# NEW: Gemini Chat & Action Endpoint
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    if 'tokens' not in session:
+        return jsonify({'error': 'Not authenticated. Visit /login first.'}), 401
+
+    data = request.get_json()
+    if not data or 'message' not in data:
+        return jsonify({'error': 'Missing "message" in request payload'}), 400
+
+    user_message = data['message']
+
+    try:
+        # Passes prompt and active user credentials to Gemini/Calendar processor
+        ai_response = process_prompt(user_message, session['tokens'])
+        return jsonify({'reply': ai_response})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
