@@ -10,7 +10,7 @@ import gemini_calander
 load_dotenv()
 
 MODEL = "gemini-3.6-flash"
-MAX_TOOL_ROUNDS = 15
+MAX_TOOL_ROUNDS = 5
 
 CALENDAR_TOOLS = [
     gemini_calander.create_calendar_event,
@@ -45,17 +45,34 @@ def build_system_instruction() -> str:
     - Soft events (study, gym, personal) can be moved.
     - If a priority task conflicts with a soft event, call list_upcoming_events,
       then move_event to shift the flexible item, then schedule the new one.
-    -Always ask if a task is overlapping another one if that is ok or not then resolve accordingly
 
     Report back only what the tools actually returned. If a tool returns an
     error, tell the user plainly what failed.
     """
 
 
-def process_prompt(user_message: str, tokens: dict) -> str:
+MAX_HISTORY_TURNS = 20  # user+model pairs kept; older ones are dropped
+
+
+def _history_to_contents(history: list[dict] | None) -> list[types.Content]:
+    """Turn the plain-dict history we store in the Flask session back into
+    Content objects. Only plain text turns are kept here — tool call/response
+    parts are never persisted, so this stays JSON-serializable in the session."""
+    contents = []
+    for turn in (history or [])[-MAX_HISTORY_TURNS * 2:]:
+        contents.append(types.Content(role=turn["role"], parts=[types.Part(text=turn["text"])]))
+    return contents
+
+
+def process_prompt(user_message: str, tokens: dict, history: list[dict] | None = None):
+    """
+    Returns (reply_text, updated_history).
+    `history` is a JSON-serializable list of {"role": "user"|"model", "text": str},
+    meant to be round-tripped through something like the Flask session.
+    """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        return "Error: GEMINI_API_KEY is missing from the .env file."
+        return "Error: GEMINI_API_KEY is missing from the .env file.", history or []
 
     client = genai.Client(api_key=api_key)
 
@@ -68,7 +85,13 @@ def process_prompt(user_message: str, tokens: dict) -> str:
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
-    contents = [types.Content(role="user", parts=[types.Part(text=user_message)])]
+    # Prior turns + the new message. Tool call/response parts get appended
+    # below for this request only — they are never written back to `history`.
+    contents = _history_to_contents(history)
+    contents.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
+
+    new_history = list(history or [])
+    new_history.append({"role": "user", "text": user_message})
 
     # Bind this request's OAuth tokens for the calendar layer to pick up.
     reset_token = gemini_calander.set_tokens(tokens)
@@ -80,7 +103,8 @@ def process_prompt(user_message: str, tokens: dict) -> str:
 
             calls = response.function_calls
             if not calls:
-                return response.text
+                new_history.append({"role": "model", "text": response.text})
+                return response.text, new_history
 
             contents.append(response.candidates[0].content)
 
@@ -104,6 +128,8 @@ def process_prompt(user_message: str, tokens: dict) -> str:
 
             contents.append(types.Content(role="user", parts=tool_parts))
 
-        return "Stopped after too many tool steps. Try a simpler request."
+        reply = "Stopped after too many tool steps. Try a simpler request."
+        new_history.append({"role": "model", "text": reply})
+        return reply, new_history
     finally:
         gemini_calander.reset_tokens(reset_token)

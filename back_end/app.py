@@ -77,11 +77,18 @@ def chat():
     user_message = data['message']
 
     try:
-        # Passes prompt and active user credentials to Gemini/Calendar processor
-        ai_response = process_prompt(user_message, session['tokens'])
+        # Passes prompt, active user credentials, and prior turns to the processor
+        history = session.get('chat_history', [])
+        ai_response, history = process_prompt(user_message, session['tokens'], history)
+        session['chat_history'] = history
         return jsonify({'reply': ai_response})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/chat/reset', methods=['POST'])
+def reset_chat():
+    session.pop('chat_history', None)
+    return jsonify({'ok': True})
 
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
