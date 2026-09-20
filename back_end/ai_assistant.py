@@ -1,5 +1,6 @@
 import os
 import datetime
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from google import genai
@@ -26,7 +27,7 @@ CALENDAR_TOOLS = [
 
 
 def build_system_instruction() -> str:
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(ZoneInfo("America/New_York"))
     return f"""
     You are an intelligent calendar assistant for a college student.
     The current date and time is {now.strftime("%A, %B %d, %Y %I:%M %p")}.
@@ -51,13 +52,10 @@ def build_system_instruction() -> str:
     """
 
 
-MAX_HISTORY_TURNS = 20  # user+model pairs kept; older ones are dropped
+MAX_HISTORY_TURNS = 20
 
 
 def _history_to_contents(history: list[dict] | None) -> list[types.Content]:
-    """Turn the plain-dict history we store in the Flask session back into
-    Content objects. Only plain text turns are kept here — tool call/response
-    parts are never persisted, so this stays JSON-serializable in the session."""
     contents = []
     for turn in (history or [])[-MAX_HISTORY_TURNS * 2:]:
         contents.append(types.Content(role=turn["role"], parts=[types.Part(text=turn["text"])]))
@@ -65,11 +63,6 @@ def _history_to_contents(history: list[dict] | None) -> list[types.Content]:
 
 
 def process_prompt(user_message: str, tokens: dict, history: list[dict] | None = None):
-    """
-    Returns (reply_text, updated_history).
-    `history` is a JSON-serializable list of {"role": "user"|"model", "text": str},
-    meant to be round-tripped through something like the Flask session.
-    """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return "Error: GEMINI_API_KEY is missing from the .env file.", history or []
@@ -80,20 +73,15 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
         system_instruction=build_system_instruction(),
         tools=CALENDAR_TOOLS,
         temperature=0.1,
-        # Critical: without this the SDK executes the tools itself, before we
-        # get a chance to attach the user's OAuth tokens.
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
-    # Prior turns + the new message. Tool call/response parts get appended
-    # below for this request only — they are never written back to `history`.
     contents = _history_to_contents(history)
     contents.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
 
     new_history = list(history or [])
     new_history.append({"role": "user", "text": user_message})
 
-    # Bind this request's OAuth tokens for the calendar layer to pick up.
     reset_token = gemini_calander.set_tokens(tokens)
     try:
         for _ in range(MAX_TOOL_ROUNDS):

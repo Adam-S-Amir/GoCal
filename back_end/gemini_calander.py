@@ -1,11 +1,5 @@
 """
 Google Calendar tools exposed to Gemini.
-
-Key changes vs. the original:
-  * No `tokens` parameter on any tool. Gemini would otherwise see it in the
-    generated schema and try to fill it. Tokens live in a contextvar that
-    ai_assistant.process_prompt sets for the duration of one request.
-  * Every function actually calls the Calendar API. No mocks.
 """
 
 import datetime
@@ -17,7 +11,6 @@ from google_service import get_calendar_service
 TZ_NAME = "America/New_York"
 TZ = ZoneInfo(TZ_NAME)
 
-# Workday window used when searching for free slots.
 DAY_START_HOUR = 8
 DAY_END_HOUR = 22
 
@@ -25,7 +18,6 @@ _tokens_var = contextvars.ContextVar("gocal_tokens", default=None)
 
 
 def set_tokens(tokens: dict):
-    """Called by ai_assistant before handing tools to Gemini. Returns a reset token."""
     return _tokens_var.set(tokens)
 
 
@@ -49,7 +41,6 @@ def _now():
 
 
 def _parse(dt_string: str) -> datetime.datetime:
-    """Parse an ISO 8601 string from Gemini. Assumes local TZ if naive."""
     dt = datetime.datetime.fromisoformat(dt_string.replace("Z", "+00:00"))
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=TZ)
@@ -79,7 +70,7 @@ def _busy_blocks(events):
     for e in events:
         s = e["start"].get("dateTime")
         en = e["end"].get("dateTime")
-        if not s or not en:          # all-day event, doesn't block time
+        if not s or not en:
             continue
         blocks.append((_parse(s).astimezone(TZ), _parse(en).astimezone(TZ)))
     return sorted(blocks)
@@ -107,7 +98,6 @@ def _open_gaps(date_str: str, blocks):
 
 
 def _find_event(service, event_title: str):
-    """Return the first upcoming event whose text matches event_title, or None."""
     result = service.events().list(
         calendarId="primary",
         q=event_title,
@@ -120,14 +110,8 @@ def _find_event(service, event_title: str):
     return items[0] if items else None
 
 
-def _fmt(dt: datetime.datetime) -> str:
-    return dt.strftime("%-I:%M %p") if hasattr(dt, "strftime") else str(dt)
-
-
 def _fmt_win(dt: datetime.datetime) -> str:
-    # Windows has no %-I, so format manually.
-    hour = dt.hour % 12 or 12
-    return f"{hour}:{dt.minute:02d} {'AM' if dt.hour < 12 else 'PM'}"
+    return dt.strftime("%I:%M %p").lstrip("0")
 
 
 # -------------------------------------------------------------------
@@ -137,14 +121,6 @@ def _fmt_win(dt: datetime.datetime) -> str:
 def create_calendar_event(summary: str, start_time: str, end_time: str, description: str = "") -> str:
     """
     Creates a new event with a specific start and end time on the user's Google Calendar.
-    This is the DEFAULT tool for scheduling anything that happens at a known time,
-    including classes, study sessions, meetings, gym, and appointments.
-
-    Args:
-        summary: Title of the event (e.g., "Study session - MATH 2204").
-        start_time: Start datetime in ISO 8601 format (e.g., "2026-09-20T15:00:00").
-        end_time: End datetime in ISO 8601 format (e.g., "2026-09-20T16:30:00").
-        description: Optional notes for the event body.
     """
     try:
         service = _service()
@@ -163,9 +139,6 @@ def create_calendar_event(summary: str, start_time: str, end_time: str, descript
 def list_upcoming_events(max_results: int = 5) -> str:
     """
     Retrieves the next few upcoming events from the user's Google Calendar.
-
-    Args:
-        max_results: How many events to return (default 5).
     """
     try:
         service = _service()
@@ -192,9 +165,6 @@ def list_upcoming_events(max_results: int = 5) -> str:
 def remove_event(event_title: str) -> str:
     """
     Deletes or cancels an upcoming event, found by matching its title.
-
-    Args:
-        event_title: Name or keyword of the event to delete (e.g., "gym").
     """
     try:
         service = _service()
@@ -210,12 +180,6 @@ def remove_event(event_title: str) -> str:
 def make_time(activity: str, duration_minutes: int = 60, preferred_date: str = "") -> str:
     """
     Finds the first open gap on a given day and books dedicated time for a task.
-    Use this only when the user has NOT given a specific start time.
-
-    Args:
-        activity: What the time is for (e.g., "Study for CS 1114").
-        duration_minutes: How long the block should be.
-        preferred_date: Date as YYYY-MM-DD. Defaults to today.
     """
     try:
         if not preferred_date:
@@ -240,13 +204,7 @@ def make_time(activity: str, duration_minutes: int = 60, preferred_date: str = "
 
 def due_dates(task_name: str, due_date: str, course_name: str = "") -> str:
     """
-    Adds an ALL-DAY deadline marker for an assignment. Use this only for due dates
-    with no specific time of day. If the user gives a time, use create_calendar_event.
-
-    Args:
-        task_name: Name of the assignment or task (e.g., "Project 1 Submission").
-        due_date: Due date as YYYY-MM-DD.
-        course_name: Optional course code (e.g., "MATH 2204").
+    Adds an ALL-DAY deadline marker for an assignment.
     """
     try:
         service = _service()
@@ -270,11 +228,6 @@ def due_dates(task_name: str, due_date: str, course_name: str = "") -> str:
 def move_event(event_title: str, new_start_time: str, new_duration_minutes: int = 0) -> str:
     """
     Reschedules an existing event to a new date and time.
-
-    Args:
-        event_title: Name or keyword of the event to move (e.g., "gym").
-        new_start_time: New start datetime in ISO 8601 format.
-        new_duration_minutes: New length in minutes. Pass 0 to keep the original length.
     """
     try:
         service = _service()
@@ -305,9 +258,6 @@ def move_event(event_title: str, new_start_time: str, new_duration_minutes: int 
 def get_day_summary(target_date: str) -> str:
     """
     Lists everything scheduled on one specific day.
-
-    Args:
-        target_date: Date as YYYY-MM-DD.
     """
     try:
         service = _service()
@@ -331,11 +281,6 @@ def get_day_summary(target_date: str) -> str:
 def find_free_time(duration_minutes: int, target_date: str, prefer_time_of_day: str = "any") -> str:
     """
     Finds open slots on a day that are long enough for a task. Does not book anything.
-
-    Args:
-        duration_minutes: Length of time needed.
-        target_date: Date as YYYY-MM-DD.
-        prefer_time_of_day: "morning", "afternoon", "evening", or "any".
     """
     try:
         service = _service()
@@ -363,13 +308,6 @@ def find_free_time(duration_minutes: int, target_date: str, prefer_time_of_day: 
 def update_event_details(event_title: str, location: str = "", description: str = "", new_title: str = "") -> str:
     """
     Updates the non-time details of an event: location, notes, or title.
-    Do NOT use this to change start or end times. Use move_event for that.
-
-    Args:
-        event_title: Current name of the event to find.
-        location: New location (e.g., "Newman Library Room 201").
-        description: New notes or description.
-        new_title: New title, if renaming.
     """
     try:
         service = _service()
