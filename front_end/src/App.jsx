@@ -13,9 +13,23 @@ function App() {
   const [isSnackDisabled, setIsSnackDisabled] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [needsCalendarAuth, setNeedsCalendarAuth] = useState(false);
+  const [googleUser, setGoogleUser] = useState(null);
 
   const preferencesRef = useRef(null);
   const chatMessagesRef = useRef(null);
+
+  // Decodes the JWT Google Identity Services returns, just enough to pull
+  // out a name/email for display. Not a security check — the backend never
+  // sees or trusts this token; it's purely a "hi, you're signed in" UI step.
+  const decodeGoogleCredential = (credential) => {
+    try {
+      const payload = credential.split(".")[1];
+      const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
+      return JSON.parse(json);
+    } catch {
+      return null;
+    }
+  };
 
   const scrollToPreferences = () => {
     preferencesRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -27,21 +41,50 @@ function App() {
     }
   }, [messages]);
 
-  // Google Sign-In tugmasini avtomatik chiqarish uchun hook
+  // Google Sign-In button init. The GSI script tag loads with async/defer,
+  // so on first mount window.google is often still undefined — this used to
+  // just give up silently in that case. Poll briefly until it's ready instead
+  // of relying on the effect firing exactly once at the right moment.
   useEffect(() => {
-    if (currentScreen === "home" && window.google) {
+    if (currentScreen !== "home") return;
+
+    let cancelled = false;
+    const tryInit = () => {
+      if (cancelled) return true;
+      if (!(window.google && window.google.accounts && window.google.accounts.id)) {
+        return false;
+      }
       try {
         window.google.accounts.id.initialize({
           client_id: "261130417939-bmck13fp7ncmt6f19vngk5nlltukcidg.apps.googleusercontent.com",
-          callback: (response) => console.log("Google Login Response:", response),
+          callback: (response) => {
+            const profile = decodeGoogleCredential(response.credential);
+            setGoogleUser(profile || { name: "there" });
+          },
         });
-        window.google.accounts.id.renderButton(
-          document.getElementById("buttonDiv"),
-          { theme: "outline", size: "large", type: "standard", width: "250", locale: "en" }
-        );
+        const target = document.getElementById("buttonDiv");
+        if (target) {
+          window.google.accounts.id.renderButton(target, {
+            theme: "outline", size: "large", type: "standard", width: "250", locale: "en",
+          });
+        }
       } catch (error) {
-        console.error("Google Auth xatosi:", error);
+        console.error("Google Auth error:", error);
       }
+      return true;
+    };
+
+    if (!tryInit()) {
+      const interval = setInterval(() => {
+        if (tryInit()) clearInterval(interval);
+      }, 200);
+      // Stop trying after 10s so we don't poll forever if the script failed to load at all.
+      const timeout = setTimeout(() => clearInterval(interval), 10000);
+      return () => {
+        cancelled = true;
+        clearInterval(interval);
+        clearTimeout(timeout);
+      };
     }
   }, [currentScreen]);
 
@@ -224,9 +267,14 @@ function App() {
                   setCurrentScreen("chat");
                 }}
                 className="btn-primary"
-                style={{ fontSize: "16px", padding: "12px 25px", width: "100%", marginTop: "10px" }}
+                disabled={!googleUser}
+                title={!googleUser ? "Sign in with Google above first" : undefined}
+                style={{
+                  fontSize: "16px", padding: "12px 25px", width: "100%", marginTop: "10px",
+                  opacity: googleUser ? 1 : 0.5, cursor: googleUser ? "pointer" : "not-allowed",
+                }}
               >
-                Save & Continue to Chat
+                {googleUser ? `Save & Continue to Chat` : "Sign in with Google to continue"}
               </button>
             </div>
 
@@ -257,7 +305,9 @@ function App() {
                 <span>Callie</span>
               </div>
               <p className="mascot-text">
-                Keep Calm and ask Callie about your calendar
+                {googleUser?.given_name || googleUser?.name
+                  ? `Hi ${googleUser.given_name || googleUser.name}, ask Callie about your calendar`
+                  : "Keep Calm and ask Callie about your calendar"}
               </p>
             </div>
 
