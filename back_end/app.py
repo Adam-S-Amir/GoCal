@@ -1,9 +1,8 @@
 import os
-from flask import Flask, redirect, request, session, jsonify
+from flask import Flask, redirect, request, session, jsonify, send_from_directory
 from dotenv import load_dotenv
 from google_service import get_oauth_flow
 from calendar_controller import list_upcoming_events
-# Import your AI assistant function (adjust function/file name if yours is named differently)
 from ai_assistant import process_prompt
 
 # Allow HTTP for local testing
@@ -11,15 +10,14 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 load_dotenv()
 
-app = Flask(__name__)
+FRONTEND_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'front_end', 'dist'))
+app = Flask(__name__, static_folder=FRONTEND_FOLDER, static_url_path="")
 app.secret_key = os.getenv("SESSION_SECRET", "dev_secret_key")
 
-@app.route('/')
-def home():
-    if 'tokens' in session:
-        return 'Authenticated! Go to <a href="/events">/events</a> to see upcoming calendar items.'
-    return 'Not logged in. Go to <a href="/login">/login</a> to authorize Google Calendar.'
 
+# -------------------------------------------------------------------
+# AUTH & API ENDPOINTS
+# -------------------------------------------------------------------
 @app.route('/login')
 def login():
     flow = get_oauth_flow()
@@ -64,7 +62,6 @@ def get_events():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# NEW: Gemini Chat & Action Endpoint
 @app.route('/api/chat', methods=['POST'])
 def chat():
     if 'tokens' not in session:
@@ -89,6 +86,17 @@ def chat():
 def reset_chat():
     session.pop('chat_history', None)
     return jsonify({'ok': True})
+
+
+# -------------------------------------------------------------------
+# REACT CATCH-ALL ROUTE (Serves frontend for all non-API paths)
+# -------------------------------------------------------------------
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_react(path):
+    if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
+        return send_from_directory(app.static_folder, path)
+    return send_from_directory(app.static_folder, "index.html")
 
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
