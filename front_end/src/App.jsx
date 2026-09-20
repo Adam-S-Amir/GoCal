@@ -1,39 +1,16 @@
 import React, { useState, useRef, useEffect } from "react";
-// 🔴 ADDED: Import CSS for animations (logo, AI pulsing, microphone listening)
-
-// In production this is set at build time on Render to https://api.gocal.us.
-// Locally it's empty, so requests stay relative and hit the Vite dev proxy.
-const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 function App() {
-  // 🔴 ADDED: Animation states for the UI
-  const [isAiSpeaking, setIsAiSpeaking] = useState(false);
-  const [isListening, setIsListening] = useState(false);
-
-  // Teammate's original states
   const [currentScreen, setCurrentScreen] = useState("home");
   const [messages, setMessages] = useState([
     { sender: "ai", text: "Hi there! How can I help you organize your day?" }
   ]);
   const [inputValue, setInputValue] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
   const [isSnackDisabled, setIsSnackDisabled] = useState(false);
-  const [isSending, setIsSending] = useState(false);
-  const [needsCalendarAuth, setNeedsCalendarAuth] = useState(false);
-  const [googleUser, setGoogleUser] = useState(null);
-
+  
   const preferencesRef = useRef(null);
   const chatMessagesRef = useRef(null);
-
-  // Decodes the JWT Google Identity Services returns
-  const decodeGoogleCredential = (credential) => {
-    try {
-      const payload = credential.split(".")[1];
-      const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
-      return JSON.parse(json);
-    } catch {
-      return null;
-    }
-  };
 
   const scrollToPreferences = () => {
     preferencesRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -43,110 +20,76 @@ function App() {
     if (chatMessagesRef.current) {
       chatMessagesRef.current.scrollTop = chatMessagesRef.current.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, isLoading]);
 
-  // Google Sign-In button init
+  // Google Sign-In button initialization hook
   useEffect(() => {
-    if (currentScreen !== "home") return;
-
-    let cancelled = false;
-    const tryInit = () => {
-      if (cancelled) return true;
-      if (!(window.google && window.google.accounts && window.google.accounts.id)) {
-        return false;
-      }
+    if (currentScreen === "home" && window.google) {
       try {
         window.google.accounts.id.initialize({
           client_id: "261130417939-bmck13fp7ncmt6f19vngk5nlltukcidg.apps.googleusercontent.com",
-          callback: (response) => {
-            const profile = decodeGoogleCredential(response.credential);
-            setGoogleUser(profile || { name: "there" });
-          },
+          callback: (response) => console.log("Google Login Response:", response),
         });
-        const target = document.getElementById("buttonDiv");
-        if (target) {
-          window.google.accounts.id.renderButton(target, {
-            theme: "outline", size: "large", type: "standard", width: "250", locale: "en",
-          });
-        }
+        window.google.accounts.id.renderButton(
+          document.getElementById("buttonDiv"),
+          { theme: "outline", size: "large", type: "standard", width: "250", locale: "en" }
+        );
       } catch (error) {
         console.error("Google Auth error:", error);
       }
-      return true;
-    };
-
-    if (!tryInit()) {
-      const interval = setInterval(() => {
-        if (tryInit()) clearInterval(interval);
-      }, 200);
-      const timeout = setTimeout(() => clearInterval(interval), 10000);
-      return () => {
-        cancelled = true;
-        clearInterval(interval);
-        clearTimeout(timeout);
-      };
     }
   }, [currentScreen]);
 
+  // Connects directly to Flask backend
   const handleSendMessage = async () => {
-    const text = inputValue.trim();
-    if (text === "" || isSending) return;
+    if (inputValue.trim() === "" || isLoading) return;
 
-    const userMessage = { sender: "user", text };
+    const userMessageText = inputValue;
+    const userMessage = { sender: "user", text: userMessageText };
+    
+    // Add user message to UI & clear input
     setMessages((prev) => [...prev, userMessage]);
     setInputValue("");
-    setIsSending(true);
-
-    // 🔴 ADDED: Turn on AI speaking animation while waiting for response
-    setIsAiSpeaking(true);
+    setIsLoading(true);
 
     try {
-      const res = await fetch(`${API_BASE}/api/chat`, {
+      const response = await fetch("http://localhost:5000/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ message: text }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include", // Pass session cookie for authentication
+        body: JSON.stringify({ message: userMessageText }),
       });
 
-      if (res.status === 401) {
-        setNeedsCalendarAuth(true);
+      const data = await response.json();
+
+      if (response.ok) {
         setMessages((prev) => [
           ...prev,
-          { sender: "ai", text: "You'll need to connect your Google Calendar first — use the button below." },
+          { sender: "ai", text: data.reply }
         ]);
-        return;
-      }
-
-      const data = await res.json();
-
-      if (!res.ok) {
+      } else if (response.status === 401) {
         setMessages((prev) => [
           ...prev,
-          { sender: "ai", text: `Something went wrong: ${data.error || "unknown error"}` },
+          { 
+            sender: "ai", 
+            text: "You are not logged in with Google. Please log in first via http://localhost:5000/login to allow calendar access." 
+          }
         ]);
-        return;
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          { sender: "ai", text: `Error: ${data.error || "Something went wrong."}` }
+        ]);
       }
-
-      setMessages((prev) => [...prev, { sender: "ai", text: data.reply }]);
-    } catch (err) {
+    } catch (error) {
       setMessages((prev) => [
         ...prev,
-        { sender: "ai", text: "Couldn't reach the server. Is the Flask backend running on port 5000?" },
+        { sender: "ai", text: "Network error. Make sure your Flask backend is running on http://localhost:5000." }
       ]);
     } finally {
-      setIsSending(false);
-      // 🔴 ADDED: Turn off AI speaking animation when response arrives
-      setIsAiSpeaking(false);
-    }
-  };
-
-  // 🔴 ADDED: Microphone click handler for listening animation
-  const handleMicrophoneClick = () => {
-    setIsListening(!isListening);
-    if (!isListening) {
-      console.log("Microphone is listening...");
-    } else {
-      console.log("Microphone stopped.");
+      setIsLoading(false);
     }
   };
 
@@ -170,6 +113,7 @@ function App() {
         <div id="home-screen" style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%" }}>
           <div className="hero-container">
             
+            {/* Background elements */}
             <div className="calendar-bg cal-1">
               <div className="cal-header"></div>
               <div className="cal-grid">
@@ -193,8 +137,7 @@ function App() {
             </div>
 
             <div className="header">
-              {/* 🔴 ADDED: Replaced standard text with Image Logo */}
-              <img src="/GoCal-Logo.png" alt="GoCal Logo" className="app-logo" />
+              <h1 className="logo">GoCal</h1>
             </div>
 
             <div className="hero-section">
@@ -211,6 +154,16 @@ function App() {
                   Get Started
                 </button>
                 <p className="login-hint">Sign up / Log in</p>
+                
+                {/* Direct link to Flask OAuth login */}
+                <a 
+                  href="http://localhost:5000/login" 
+                  style={{ display: "inline-block", margin: "10px 0", color: "#2563eb", fontWeight: "600" }}
+                >
+                  🔐 Log in with Google (Backend OAuth)
+                </a>
+
+                {/* Google Sign In button rendered here */}
                 <div id="buttonDiv" style={{ marginTop: "10px" }}></div>
               </div>
             </div>
@@ -278,14 +231,9 @@ function App() {
                   setCurrentScreen("chat");
                 }}
                 className="btn-primary"
-                disabled={!googleUser}
-                title={!googleUser ? "Sign in with Google above first" : undefined}
-                style={{
-                  fontSize: "16px", padding: "12px 25px", width: "100%", marginTop: "10px",
-                  opacity: googleUser ? 1 : 0.5, cursor: googleUser ? "pointer" : "not-allowed",
-                }}
+                style={{ fontSize: "16px", padding: "12px 25px", width: "100%", marginTop: "10px" }}
               >
-                {googleUser ? `Save & Continue to Chat` : "Sign in with Google to continue"}
+                Save & Continue to Chat
               </button>
             </div>
 
@@ -309,19 +257,14 @@ function App() {
             >
               &larr; Back
             </button>
-            
-            {/* 🔴 ADDED: Replaced Sidebar Text Logo with Image Logo */}
-            <img src="/GoCal-Logo.png" alt="GoCal Logo" className="secondsidebar-logo" />
+            <h1 className="logo sidebar-logo">GoCal</h1>
 
             <div className="mascot-section">
-              {/* 🔴 ADDED: Dynamic speaking class for AI animation */}
-              <div className={`mascot-circle ${isAiSpeaking ? 'speaking' : ''}`}>
+              <div className="mascot-circle">
                 <span>Callie</span>
               </div>
               <p className="mascot-text">
-                {googleUser?.given_name || googleUser?.name
-                  ? `Hi ${googleUser.given_name || googleUser.name}, ask Callie about your calendar`
-                  : "Keep Calm and ask Callie about your calendar!"}
+                Keep Calm and ask Callie about your calendar
               </p>
             </div>
 
@@ -339,22 +282,14 @@ function App() {
                   </div>
                 </div>
               ))}
-              {isSending && (
+              {isLoading && (
                 <div className="message-row ai-row">
                   <div className="message-bubble ai-bubble">
-                    <p>Callie is thinking…</p>
+                    <p style={{ fontStyle: "italic", opacity: 0.7 }}>Callie is thinking...</p>
                   </div>
                 </div>
               )}
             </div>
-
-            {needsCalendarAuth && (
-              <div className="chat-input-area" style={{ justifyContent: "center" }}>
-                <a href={`${API_BASE}/login`} className="btn-primary" style={{ textDecoration: "none", textAlign: "center" }}>
-                  Connect Google Calendar
-                </a>
-              </div>
-            )}
 
             <div className="chat-input-area">
               <input
@@ -362,16 +297,15 @@ function App() {
                 placeholder="Type your plan..."
                 className="chat-input"
                 value={inputValue}
+                disabled={isLoading}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyPress={handleKeyPress}
-                disabled={isSending}
               />
-              {/* 🔴 ADDED: Dynamic listening class and onClick handler for Mic button */}
               <button 
                 type="button" 
-                className={`btn-send ${isListening ? 'listening' : ''}`} 
-                onClick={handleMicrophoneClick} 
-                disabled={isSending}
+                className="btn-send" 
+                onClick={handleSendMessage}
+                disabled={isLoading}
               >
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />

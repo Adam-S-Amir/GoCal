@@ -1,22 +1,35 @@
 import os
 from flask import Flask, redirect, request, session, jsonify
+from flask_cors import CORS
 from dotenv import load_dotenv
+
 from google_service import get_oauth_flow
 from calendar_controller import list_upcoming_events
 from ai_assistant import process_prompt
 
+# Allow HTTP for local OAuth testing
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
+# Load environment variables from .env file
 load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SESSION_SECRET", "dev_secret_key")
+
+# Enable CORS for React dev servers (allows sending session cookies)
+CORS(
+    app,
+    supports_credentials=True,
+    origins=["http://localhost:3000", "http://localhost:5173"]
+)
+
 
 @app.route('/')
 def home():
     if 'tokens' in session:
         return 'Authenticated! Go to <a href="/events">/events</a> to see upcoming calendar items.'
     return 'Not logged in. Go to <a href="/login">/login</a> to authorize Google Calendar.'
+
 
 @app.route('/login')
 def login():
@@ -29,6 +42,7 @@ def login():
     session['state'] = state
     session['code_verifier'] = flow.code_verifier
     return redirect(auth_url)
+
 
 @app.route('/api/auth/callback')
 def callback():
@@ -49,6 +63,7 @@ def callback():
     }
     return redirect('/')
 
+
 @app.route('/events')
 def get_events():
     if 'tokens' not in session:
@@ -59,6 +74,7 @@ def get_events():
         return jsonify(events)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -79,10 +95,12 @@ def chat():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/chat/reset', methods=['POST'])
 def reset_chat():
     session.pop('chat_history', None)
     return jsonify({'ok': True})
+
 
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
