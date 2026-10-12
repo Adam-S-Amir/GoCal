@@ -27,22 +27,6 @@ def _service():
 def _now():
     return datetime.datetime.now(TZ)
 
-def _safe_date(date_str: str) -> str:
-    """Safely converts 'today', 'tomorrow', ISO strings, or empty values into YYYY-MM-DD."""
-    if not date_str or not isinstance(date_str, str):
-        return _now().strftime("%Y-%m-%d")
-    s = date_str.strip().lower()
-    if s in ("today", "now", "current"):
-        return _now().strftime("%Y-%m-%d")
-    if s == "tomorrow":
-        return (_now() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-    if "t" in s:
-        s = s.split("t")[0]
-    try:
-        return datetime.date.fromisoformat(s).isoformat()
-    except Exception:
-        return _now().strftime("%Y-%m-%d")
-
 def _parse(dt_string: str) -> datetime.datetime:
     dt = datetime.datetime.fromisoformat(dt_string.replace("Z", "+00:00"))
     if dt.tzinfo is None:
@@ -50,8 +34,7 @@ def _parse(dt_string: str) -> datetime.datetime:
     return dt.astimezone(TZ)
 
 def _day_bounds(date_str: str):
-    date_clean = _safe_date(date_str)
-    d = datetime.date.fromisoformat(date_clean)
+    d = datetime.date.fromisoformat(date_str)
     start = datetime.datetime.combine(d, datetime.time(0, 0), tzinfo=TZ)
     end = datetime.datetime.combine(d, datetime.time(23, 59, 59), tzinfo=TZ)
     return start.isoformat(), end.isoformat()
@@ -78,19 +61,9 @@ def _busy_blocks(events):
     return blocks
 
 def _open_gaps(date_str: str, blocks):
-    date_clean = _safe_date(date_str)
-    d = datetime.date.fromisoformat(date_clean)
-    now = _now()
-
-    # Start from 8 AM or current time if checking today
+    d = datetime.date.fromisoformat(date_str)
     cursor = datetime.datetime.combine(d, datetime.time(DAY_START_HOUR), tzinfo=TZ)
-    if d == now.date() and now > cursor:
-        cursor = now
-
     day_end = datetime.datetime.combine(d, datetime.time(DAY_END_HOUR), tzinfo=TZ)
-    if cursor >= day_end:
-        return []
-
     gaps = []
     for b_start, b_end in blocks:
         if b_end <= cursor:
@@ -127,7 +100,9 @@ def _fmt_win(dt: datetime.datetime) -> str:
 # -------------------------------------------------------------------
 
 def create_calendar_event(summary: str, start_time: str, end_time: str, description: str) -> str:
-    """Creates a new event with a specific start and end time on the user's Google Calendar."""
+    """
+    Creates a new event with a specific start and end time on the user's Google Calendar.
+    """
     try:
         desc = description if description else ""
         service = _service()
@@ -143,7 +118,9 @@ def create_calendar_event(summary: str, start_time: str, end_time: str, descript
         return f"Error creating event: {e}"
 
 def list_upcoming_events(max_results: int) -> str:
-    """Retrieves the next few upcoming events from the user's Google Calendar."""
+    """
+    Retrieves the next few upcoming events from the user's Google Calendar.
+    """
     try:
         limit = int(max_results) if max_results else 5
         service = _service()
@@ -166,7 +143,9 @@ def list_upcoming_events(max_results: int) -> str:
         return f"Error fetching events: {e}"
 
 def remove_event(event_title: str) -> str:
-    """Deletes or cancels an upcoming event, found by matching its title."""
+    """
+    Deletes or cancels an upcoming event, found by matching its title.
+    """
     try:
         service = _service()
         event = _find_event(service, event_title)
@@ -178,12 +157,14 @@ def remove_event(event_title: str) -> str:
         return f"Error deleting event: {e}"
 
 def make_time(activity: str, duration_minutes: int, preferred_date: str) -> str:
-    """Finds the first open gap on a given day and books dedicated time for a task on Google Calendar."""
+    """
+    Finds the first open gap on a given day and books dedicated time for a task on Google Calendar.
+    """
     try:
         mins = int(duration_minutes) if duration_minutes else 60
-        target_date = _safe_date(preferred_date)
+        pref_date = preferred_date if preferred_date else _now().strftime("%Y-%m-%d")
         service = _service()
-        gaps = _open_gaps(target_date, _busy_blocks(_events_for_day(service, target_date)))
+        gaps = _open_gaps(pref_date, _busy_blocks(_events_for_day(service, pref_date)))
         need = datetime.timedelta(minutes=mins)
         for start, end in gaps:
             if end - start >= need:
@@ -191,20 +172,21 @@ def make_time(activity: str, duration_minutes: int, preferred_date: str) -> str:
                     summary=activity,
                     start_time=start.isoformat(),
                     end_time=(start + need).isoformat(),
-                    description="Auto-scheduled focus time by Callie",
+                    description="Auto-scheduled focus time",
                 )
-        return f"No open {mins}-minute slot on {target_date} between {DAY_START_HOUR}:00 and {DAY_END_HOUR}:00."
+        return f"No open {mins}-minute slot on {pref_date} between {DAY_START_HOUR}:00 and {DAY_END_HOUR}:00."
     except Exception as e:
         return f"Error finding time: {e}"
 
 def due_dates(task_name: str, due_date: str, course_name: str) -> str:
-    """Adds an ALL-DAY deadline marker for an assignment on Google Calendar."""
+    """
+    Adds an ALL-DAY deadline marker for an assignment on Google Calendar.
+    """
     try:
         c_name = course_name if course_name else ""
         service = _service()
         title = f"DUE: {c_name} - {task_name}" if c_name else f"DUE: {task_name}"
-        clean_due = _safe_date(due_date)
-        d = datetime.date.fromisoformat(clean_due)
+        d = datetime.date.fromisoformat(due_date)
         body = {
             "summary": title,
             "start": {"date": d.isoformat()},
@@ -215,12 +197,14 @@ def due_dates(task_name: str, due_date: str, course_name: str) -> str:
             },
         }
         created = service.events().insert(calendarId="primary", body=body).execute()
-        return f"Added all-day deadline '{title}' on {clean_due}. Link: {created.get('htmlLink')}"
+        return f"Added all-day deadline '{title}' on {due_date}. Link: {created.get('htmlLink')}"
     except Exception as e:
         return f"Error creating deadline: {e}"
 
 def move_event(event_title: str, new_start_time: str, new_duration_minutes: int) -> str:
-    """Reschedules an existing event to a new date and time on Google Calendar."""
+    """
+    Reschedules an existing event to a new date and time on Google Calendar.
+    """
     try:
         dur = int(new_duration_minutes) if new_duration_minutes else 0
         service = _service()
@@ -245,13 +229,14 @@ def move_event(event_title: str, new_start_time: str, new_duration_minutes: int)
         return f"Error moving event: {e}"
 
 def get_day_summary(target_date: str) -> str:
-    """Lists everything scheduled on one specific day from Google Calendar."""
+    """
+    Lists everything scheduled on one specific day from Google Calendar.
+    """
     try:
-        clean_date = _safe_date(target_date)
         service = _service()
-        events = _events_for_day(service, clean_date)
+        events = _events_for_day(service, target_date)
         if not events:
-            return f"Nothing scheduled on {clean_date}."
+            return f"Nothing scheduled on {target_date}."
         lines = []
         for e in events:
             if "dateTime" in e["start"]:
@@ -260,36 +245,39 @@ def get_day_summary(target_date: str) -> str:
                 lines.append(f"- {e.get('summary', 'Untitled')}: {_fmt_win(s)} to {_fmt_win(en)}")
             else:
                 lines.append(f"- {e.get('summary', 'Untitled')}: all day")
-        return f"Schedule for {clean_date}:\n" + "\n".join(lines)
+        return f"Schedule for {target_date}:\n" + "\n".join(lines)
     except Exception as e:
         return f"Error building day summary: {e}"
 
 def find_free_time(duration_minutes: int, target_date: str, prefer_time_of_day: str) -> str:
-    """Finds open slots on a day that are long enough for a task. Does not book anything."""
+    """
+    Finds open slots on a day that are long enough for a task. Does not book anything.
+    """
     try:
-        clean_date = _safe_date(target_date)
         time_pref = prefer_time_of_day.lower() if prefer_time_of_day else "any"
-        mins = int(duration_minutes) if duration_minutes else 30
+        mins = int(duration_minutes) if duration_minutes else 60
         service = _service()
-        gaps = _open_gaps(clean_date, _busy_blocks(_events_for_day(service, clean_date)))
+        gaps = _open_gaps(target_date, _busy_blocks(_events_for_day(service, target_date)))
         need = datetime.timedelta(minutes=mins)
-        ranges = {"morning": (8, 12), "afternoon": (12, 17), "evening": (17, 22)}
-        lo, hi = ranges.get(time_pref, (8, 22))
+        ranges = {"morning": (0, 12), "afternoon": (12, 17), "evening": (17, 24)}
+        lo, hi = ranges.get(time_pref, (0, 24))
         usable = []
         for start, end in gaps:
             if end - start < need:
                 continue
-            if not (lo <= start.hour < hi or lo <= (end.hour or 22) <= hi):
+            if not (lo <= start.hour < hi or lo <= (end.hour or 24) <= hi):
                 continue
             usable.append(f"{_fmt_win(start)} to {_fmt_win(end)}")
         if not usable:
-            return f"No open {mins}-minute slots available on {clean_date}."
-        return f"Open slots on {clean_date}: " + "; ".join(usable)
+            return f"No {mins}-minute openings on {target_date}."
+        return f"Open slots on {target_date}: " + "; ".join(usable)
     except Exception as e:
         return f"Error finding free time: {e}"
 
 def update_event_details(event_title: str, location: str, description: str, new_title: str) -> str:
-    """Updates the non-time details of an event: location, notes, or title on Google Calendar."""
+    """
+    Updates the non-time details of an event: location, notes, or title on Google Calendar.
+    """
     try:
         service = _service()
         event = _find_event(service, event_title)
