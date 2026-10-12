@@ -82,7 +82,7 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
         system_instruction=build_system_instruction(),
         tools=CALENDAR_TOOLS,
         temperature=0.1,
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        thinking_config=types.ThinkingConfig(thinking_budget=12),
     )
 
     contents = _history_to_contents(history)
