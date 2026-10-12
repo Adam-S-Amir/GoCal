@@ -68,44 +68,44 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
 
     client = genai.Client(api_key=api_key)
 
-    # Format previous conversational history for the Chat session
-    chat_history = []
-    for turn in (history or [])[-10:]:
-        chat_history.append(
-            types.Content(
-                role=turn["role"],
-                parts=[types.Part.from_text(text=turn["text"])]
-            )
-        )
-
-    new_history = list(history or [])
-    new_history.append({"role": "user", "text": user_message})
-
-    # Set the user's OAuth tokens in context so tool functions can reach Google Calendar
+    # Set user OAuth tokens in thread context so Google Calendar API can authenticate
     reset_token = gemini_calander.set_tokens(tokens)
 
+    # Build prompt with recent context safely as text (prevents thought_signature position errors)
+    prompt = user_message
+    valid_history = [
+        t for t in (history or [])
+        if "error" not in t.get("text", "").lower() and "invalid_argument" not in t.get("text", "").lower()
+    ]
+    if valid_history:
+        recent_turns = [f"{t['role'].capitalize()}: {t['text']}" for t in valid_history[-4:]]
+        if recent_turns:
+            context_str = "\n".join(recent_turns)
+            prompt = f"Previous conversation context:\n{context_str}\n\nCurrent user request: {user_message}"
+
     try:
-        # client.chats.create automatically handles tool execution and thought signatures
+        # Start a fresh Chat session with Calendar tools
         chat = client.chats.create(
             model=MODEL,
             config=types.GenerateContentConfig(
                 system_instruction=build_system_instruction(),
                 tools=CALENDAR_TOOLS,
                 temperature=0.1,
-            ),
-            history=chat_history
+            )
         )
 
-        response = chat.send_message(user_message)
+        response = chat.send_message(prompt)
         reply = response.text or "I've checked and updated your calendar!"
+
+        new_history = list(valid_history)
+        new_history.append({"role": "user", "text": user_message})
         new_history.append({"role": "model", "text": reply})
         return reply, new_history
 
     except Exception as e:
         print(f"[Gemini Error]: {e}")
         error_msg = f"Sorry, I had trouble with that request: {e}"
-        new_history.append({"role": "model", "text": error_msg})
-        return error_msg, new_history
+        return error_msg, valid_history
 
     finally:
         gemini_calander.reset_tokens(reset_token)
