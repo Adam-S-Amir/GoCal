@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 
 // Use environment variable for backend URL or fallback to current origin if served together
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
+const API_BASE_URL = "https://gocal.onrender.com";
 
 function App() {
   const [currentScreen, setCurrentScreen] = useState("home");
