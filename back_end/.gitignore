@@ -2,6 +2,7 @@
 .env
 .env.local
 *.env
+README.md
 
 # Python cache & virtual environments
 __pycache__/
