@@ -37,7 +37,7 @@ def build_system_instruction() -> str:
     focus on formatting in human readable ways using only common symbols such as !.,; unless absolutley neccesary
         if there is overlap ask if you should reschedule
 
-    if presenting a schedule use format such as:
+    if presenting a schedule use format such as below Uisning new line variables to seperate out events:
  SUNDAY
 
 7:00 AM - Wake up
