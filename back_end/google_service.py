@@ -25,7 +25,8 @@ def get_oauth_flow(state=None, redirect_uri=None):
         client_config,
         scopes=SCOPES,
         redirect_uri=effective_redirect,
-        state=state
+        state=state,
+        autogenerate_code_verifier=False  # Disables PKCE code_verifier completely
     )
 
 def get_calendar_service(tokens):
