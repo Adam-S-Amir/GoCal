@@ -1,6 +1,5 @@
 import os
 import datetime
-import inspect
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from google import genai
@@ -10,7 +9,6 @@ import gemini_calander
 load_dotenv()
 
 MODEL = "gemini-flash-latest"
-MAX_TOOL_ROUNDS = 5
 
 CALENDAR_TOOLS = [
     gemini_calander.create_calendar_event,
@@ -23,19 +21,6 @@ CALENDAR_TOOLS = [
     gemini_calander.find_free_time,
     gemini_calander.update_event_details,
 ]
-
-# Fallbacks in case Gemini omits optional parameters
-DEFAULT_TOOL_ARGS = {
-    "description": "",
-    "max_results": 5,
-    "duration_minutes": 60,
-    "preferred_date": "",
-    "course_name": "",
-    "new_duration_minutes": 0,
-    "prefer_time_of_day": "any",
-    "location": "",
-    "new_title": "",
-}
 
 def build_system_instruction() -> str:
     now = datetime.datetime.now(ZoneInfo("America/New_York"))
@@ -91,11 +76,13 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
 
     client = genai.Client(api_key=api_key)
 
+    # 1. thinking_budget=0 turns off reasoning tokens (eliminating thought_signature errors)
+    # 2. Automatic Function Calling executes the tools automatically
     config = types.GenerateContentConfig(
         system_instruction=build_system_instruction(),
         tools=CALENDAR_TOOLS,
         temperature=0.1,
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
     )
 
     contents = _history_to_contents(history)
@@ -104,50 +91,25 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
     new_history = list(history or [])
     new_history.append({"role": "user", "text": user_message})
 
+    # Set the user's OAuth tokens in context so tool functions can reach Google Calendar
     reset_token = gemini_calander.set_tokens(tokens)
 
     try:
-        for _ in range(MAX_TOOL_ROUNDS):
-            response = client.models.generate_content(
-                model=MODEL, contents=contents, config=config
-            )
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=contents,
+            config=config
+        )
 
-            calls = response.function_calls
-            if not calls:
-                new_history.append({"role": "model", "text": response.text})
-                return response.text, new_history
-
-            contents.append(response.candidates[0].content)
-            tool_parts = []
-
-            for call in calls:
-                func = getattr(gemini_calander, call.name, None)
-                if func is None:
-                    result = f"Error: no tool named '{call.name}'."
-                else:
-                    try:
-                        # Populate any omitted arguments with defaults
-                        args = dict(call.args or {})
-                        sig = inspect.signature(func)
-                        for param_name in sig.parameters:
-                            if param_name not in args and param_name in DEFAULT_TOOL_ARGS:
-                                args[param_name] = DEFAULT_TOOL_ARGS[param_name]
-                        result = func(**args)
-                    except Exception as e:
-                        result = f"Error executing {call.name}: {e}"
-
-                print(f"[tool] {call.name}({dict(call.args or {})}) -> {result}")
-                tool_parts.append(
-                    types.Part.from_function_response(
-                        name=call.name, response={"result": result}
-                    )
-                )
-
-            contents.append(types.Content(role="user", parts=tool_parts))
-
-        reply = "Stopped after too many tool steps. Try a simpler request."
+        reply = response.text or "I've checked and updated your calendar!"
         new_history.append({"role": "model", "text": reply})
         return reply, new_history
+
+    except Exception as e:
+        print(f"[Gemini Error]: {e}")
+        error_msg = f"Sorry, I had trouble with that request: {e}"
+        new_history.append({"role": "model", "text": error_msg})
+        return error_msg, new_history
 
     finally:
         gemini_calander.reset_tokens(reset_token)
