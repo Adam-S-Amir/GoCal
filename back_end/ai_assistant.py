@@ -8,7 +8,7 @@ import gemini_calander
 
 load_dotenv()
 
-MODEL = "gemini-flash-latest"
+MODEL = "gemini-3.8-flash"
 
 CALENDAR_TOOLS = [
     gemini_calander.create_calendar_event,
@@ -61,14 +61,6 @@ SUNDAY
     Report back only what the tools actually returned. If a tool returns an error, tell the user plainly what failed.
     """
 
-MAX_HISTORY_TURNS = 20
-
-def _history_to_contents(history: list[dict] | None) -> list[types.Content]:
-    contents = []
-    for turn in (history or [])[-MAX_HISTORY_TURNS * 2:]:
-        contents.append(types.Content(role=turn["role"], parts=[types.Part(text=turn["text"])]))
-    return contents
-
 def process_prompt(user_message: str, tokens: dict, history: list[dict] | None = None):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -76,17 +68,15 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
 
     client = genai.Client(api_key=api_key)
 
-    # 1. thinking_budget=0 turns off reasoning tokens (eliminating thought_signature errors)
-    # 2. Automatic Function Calling executes the tools automatically
-    config = types.GenerateContentConfig(
-        system_instruction=build_system_instruction(),
-        tools=CALENDAR_TOOLS,
-        temperature=0.1,
-        thinking_config=types.ThinkingConfig(thinking_budget=12),
-    )
-
-    contents = _history_to_contents(history)
-    contents.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
+    # Format previous conversational history for the Chat session
+    chat_history = []
+    for turn in (history or [])[-10:]:
+        chat_history.append(
+            types.Content(
+                role=turn["role"],
+                parts=[types.Part.from_text(text=turn["text"])]
+            )
+        )
 
     new_history = list(history or [])
     new_history.append({"role": "user", "text": user_message})
@@ -95,12 +85,18 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
     reset_token = gemini_calander.set_tokens(tokens)
 
     try:
-        response = client.models.generate_content(
+        # client.chats.create automatically handles tool execution and thought signatures
+        chat = client.chats.create(
             model=MODEL,
-            contents=contents,
-            config=config
+            config=types.GenerateContentConfig(
+                system_instruction=build_system_instruction(),
+                tools=CALENDAR_TOOLS,
+                temperature=0.1,
+            ),
+            history=chat_history
         )
 
+        response = chat.send_message(user_message)
         reply = response.text or "I've checked and updated your calendar!"
         new_history.append({"role": "model", "text": reply})
         return reply, new_history
