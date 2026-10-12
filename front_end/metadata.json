@@ -1,0 +1,6 @@
+{
+  "name": "GoCal - AI Calendar Assistant",
+  "description": "An intelligent AI scheduling companion with Callie that syncs natural language instructions with your Google Calendar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
