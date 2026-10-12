@@ -1,16 +1,15 @@
 import os
 import datetime
+import inspect
 from zoneinfo import ZoneInfo
-
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-
 import gemini_calander
 
 load_dotenv()
 
-MODEL = "gemini-3.6-flash"
+MODEL = "gemini-flash-latest"
 MAX_TOOL_ROUNDS = 5
 
 CALENDAR_TOOLS = [
@@ -25,6 +24,18 @@ CALENDAR_TOOLS = [
     gemini_calander.update_event_details,
 ]
 
+# Fallbacks in case Gemini omits optional parameters
+DEFAULT_TOOL_ARGS = {
+    "description": "",
+    "max_results": 5,
+    "duration_minutes": 60,
+    "preferred_date": "",
+    "course_name": "",
+    "new_duration_minutes": 0,
+    "prefer_time_of_day": "any",
+    "location": "",
+    "new_title": "",
+}
 
 def build_system_instruction() -> str:
     now = datetime.datetime.now(ZoneInfo("America/New_York"))
@@ -32,14 +43,13 @@ def build_system_instruction() -> str:
     You are an intelligent calendar assistant for a college student.
     The current date and time is {now.strftime("%A, %B %d, %Y %I:%M %p")}.
     The user's timezone is America/New_York.
-
     your name is callie and you are very happy personal assistant. but if someone is rude to you you can be rude back.
-    focus on formatting in human readable ways using only common symbols such as !.,; unless absolutley neccesary
-        if there is overlap ask if you should reschedule
-
-    if presenting a schedule use format such as below Uisning new line variables to seperate out events:
- SUNDAY
-
+    focus on formatting in human readable ways using only common symbols such as !.,; unless absolutely neccesary
+    
+    if there is overlap ask if you should reschedule
+    if presenting a schedule use format such as below using new line variables to separate out events:
+    
+SUNDAY
 7:00 AM - Wake up
 7:30 AM - Breakfast
 8:00 AM - Clean room
@@ -59,32 +69,20 @@ def build_system_instruction() -> str:
 
     Tool selection rules:
     - If the user gives a specific start time, ALWAYS use create_calendar_event.
-      Never use due_dates for something that happens at a known time.
     - Use due_dates only for assignment deadlines with no time of day.
     - Use make_time only when the user wants time blocked but gave no start time.
-    - Resolve "tomorrow", "next Friday", etc. into concrete ISO 8601 datetimes
-      before calling a tool.
-
-    Conflict resolution rules:
-    - Fixed events (classes, exams, work) cannot be moved.
-    - Soft events (study, gym, personal) can be moved.
-    - If a priority task conflicts with a soft event, call list_upcoming_events,
-      then move_event to shift the flexible item, then schedule the new one.
-
-    Report back only what the tools actually returned. If a tool returns an
-    error, tell the user plainly what failed.
+    - Resolve "tomorrow", "next Friday", etc. into concrete ISO 8601 datetimes before calling a tool.
+    
+    Report back only what the tools actually returned. If a tool returns an error, tell the user plainly what failed.
     """
 
-
 MAX_HISTORY_TURNS = 20
-
 
 def _history_to_contents(history: list[dict] | None) -> list[types.Content]:
     contents = []
     for turn in (history or [])[-MAX_HISTORY_TURNS * 2:]:
         contents.append(types.Content(role=turn["role"], parts=[types.Part(text=turn["text"])]))
     return contents
-
 
 def process_prompt(user_message: str, tokens: dict, history: list[dict] | None = None):
     api_key = os.getenv("GEMINI_API_KEY")
@@ -107,6 +105,7 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
     new_history.append({"role": "user", "text": user_message})
 
     reset_token = gemini_calander.set_tokens(tokens)
+
     try:
         for _ in range(MAX_TOOL_ROUNDS):
             response = client.models.generate_content(
@@ -119,15 +118,21 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
                 return response.text, new_history
 
             contents.append(response.candidates[0].content)
-
             tool_parts = []
+
             for call in calls:
                 func = getattr(gemini_calander, call.name, None)
                 if func is None:
                     result = f"Error: no tool named '{call.name}'."
                 else:
                     try:
-                        result = func(**(call.args or {}))
+                        # Populate any omitted arguments with defaults
+                        args = dict(call.args or {})
+                        sig = inspect.signature(func)
+                        for param_name in sig.parameters:
+                            if param_name not in args and param_name in DEFAULT_TOOL_ARGS:
+                                args[param_name] = DEFAULT_TOOL_ARGS[param_name]
+                        result = func(**args)
                     except Exception as e:
                         result = f"Error executing {call.name}: {e}"
 
@@ -143,5 +148,6 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
         reply = "Stopped after too many tool steps. Try a simpler request."
         new_history.append({"role": "model", "text": reply})
         return reply, new_history
+
     finally:
         gemini_calander.reset_tokens(reset_token)
