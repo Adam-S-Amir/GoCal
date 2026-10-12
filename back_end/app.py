@@ -1,10 +1,7 @@
 import os
 from flask import Flask, redirect, request, session, jsonify
 from flask_cors import CORS
-<<<<<<< HEAD
-=======
 from werkzeug.middleware.proxy_fix import ProxyFix
->>>>>>> parent of 37053b4 (restart working ai)
 from dotenv import load_dotenv
 from werkzeug.middleware.proxy_fix import ProxyFix
 from google_service import get_oauth_flow
@@ -116,54 +113,6 @@ def auth_url():
 @app.route('/api/auth/callback')
 def callback():
     state = session.get('state')
-<<<<<<< HEAD
-    redirect_uri = get_effective_redirect_uri()
-
-    # Reconstruct request URL with https if terminated by reverse proxy
-    auth_response_url = request.url
-    if request.headers.get('X-Forwarded-Proto') == 'https' and auth_response_url.startswith('http://'):
-        auth_response_url = auth_response_url.replace('http://', 'https://', 1)
-
-    try:
-        flow = get_oauth_flow(state=state, redirect_uri=redirect_uri)
-        if session.get('code_verifier'):
-            flow.code_verifier = session.get('code_verifier')
-
-        flow.fetch_token(authorization_response=auth_response_url)
-        creds = flow.credentials
-
-        existing_tokens = session.get('tokens', {})
-        refresh_token = creds.refresh_token or existing_tokens.get('refresh_token')
-
-        session['tokens'] = {
-            'access_token': creds.token,
-            'refresh_token': refresh_token,
-        }
-
-        frontend_url = os.getenv("FRONTEND_URL", "/")
-        separator = "&" if "?" in frontend_url else "?"
-        return redirect(f"{frontend_url}{separator}auth=success")
-    except Exception as e:
-        print(f"[OAuth Callback Error]: {e}")
-        frontend_url = os.getenv("FRONTEND_URL", "/")
-        separator = "&" if "?" in frontend_url else "?"
-        return redirect(f"{frontend_url}{separator}auth=error&error_details={str(e)}")
-
-@app.route('/api/auth/status')
-def auth_status():
-    has_tokens = 'tokens' in session
-    return jsonify({
-        'authenticated': has_tokens,
-        'effective_redirect_uri': get_effective_redirect_uri(),
-        'has_refresh_token': bool(session.get('tokens', {}).get('refresh_token')) if has_tokens else False
-    })
-
-@app.route('/api/auth/logout', methods=['POST'])
-def logout():
-    session.pop('tokens', None)
-    session.pop('chat_history', None)
-    return jsonify({'ok': True})
-=======
     
     # Pass state into the flow creation
     flow = get_oauth_flow(state=state)
@@ -183,7 +132,6 @@ def logout():
     # Vite's dev server; in production it's the static site Render hosts at
     # gocal.us (a different subdomain from the api.gocal.us backend).
     return redirect(FRONTEND_URL)
->>>>>>> parent of 37053b4 (restart working ai)
 
 @app.route('/events')
 def get_events():
@@ -223,11 +171,6 @@ def reset_chat():
     return jsonify({'ok': True})
 
 if __name__ == '__main__':
-<<<<<<< HEAD
-    port = int(os.getenv("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
-=======
     # Local dev only. In production this file is run via gunicorn, e.g.:
     #   gunicorn -w 2 -b 127.0.0.1:5000 app:app
     app.run(port=5000, debug=not IS_PRODUCTION)
->>>>>>> parent of 37053b4 (restart working ai)
