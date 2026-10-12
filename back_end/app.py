@@ -52,6 +52,10 @@ def home():
 
 @app.route('/login')
 def login():
+    # Remember which frontend website the user came from
+    target = request.args.get('redirect_to') or request.referrer or os.getenv("FRONTEND_URL", "/")
+    session['return_url'] = target
+
     redirect_uri = get_effective_redirect_uri()
     flow = get_oauth_flow(redirect_uri=redirect_uri)
     auth_url, state = flow.authorization_url(
@@ -107,14 +111,10 @@ def callback():
             'refresh_token': refresh_token,
         }
 
-        frontend_url = os.getenv("FRONTEND_URL", "/")
+        # Redirect user back to Callie's chat on the frontend
+        frontend_url = session.get('return_url') or os.getenv("FRONTEND_URL", "/")
         separator = "&" if "?" in frontend_url else "?"
         return redirect(f"{frontend_url}{separator}auth=success")
-    except Exception as e:
-        print(f"[OAuth Callback Error]: {e}")
-        frontend_url = os.getenv("FRONTEND_URL", "/")
-        separator = "&" if "?" in frontend_url else "?"
-        return redirect(f"{frontend_url}{separator}auth=error&error_details={str(e)}")
 
 @app.route('/api/auth/status')
 def auth_status():

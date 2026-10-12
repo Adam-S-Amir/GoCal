@@ -54,7 +54,8 @@ function App() {
   };
 
   const handleLogin = () => {
-    window.location.href = `${API_BASE_URL}/login`;
+    // Passes your frontend URL to the backend so it always redirects back here
+    window.location.href = `${API_BASE_URL}/login?redirect_to=${encodeURIComponent(window.location.origin)}`;
   };
 
   const handleSendMessage = async () => {
