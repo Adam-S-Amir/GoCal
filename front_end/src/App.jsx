@@ -1,14 +1,19 @@
 import React, { useState, useRef, useEffect } from "react";
 
+// Use environment variable for backend URL or fallback to current origin if served together
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
+
 function App() {
   const [currentScreen, setCurrentScreen] = useState("home");
   const [messages, setMessages] = useState([
-    { sender: "ai", text: "Hi there! How can I help you organize your day?" }
+    { sender: "ai", text: "Hi there! I'm Callie, how can I help you organize your day?" }
   ]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isSnackDisabled, setIsSnackDisabled] = useState(false);
-  
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authError, setAuthError] = useState(null);
+
   const preferencesRef = useRef(null);
   const chatMessagesRef = useRef(null);
 
@@ -22,71 +27,75 @@ function App() {
     }
   }, [messages, isLoading]);
 
-  // Google Sign-In button initialization hook
+  // Check authentication status on load & check query string from OAuth redirect
   useEffect(() => {
-    if (currentScreen === "home" && window.google) {
-      try {
-        window.google.accounts.id.initialize({
-          client_id: "261130417939-bmck13fp7ncmt6f19vngk5nlltukcidg.apps.googleusercontent.com",
-          callback: (response) => console.log("Google Login Response:", response),
-        });
-        window.google.accounts.id.renderButton(
-          document.getElementById("buttonDiv"),
-          { theme: "outline", size: "large", type: "standard", width: "250", locale: "en" }
-        );
-      } catch (error) {
-        console.error("Google Auth error:", error);
-      }
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("auth") === "success") {
+      setIsAuthenticated(true);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (params.get("auth") === "error") {
+      setAuthError(params.get("error_details") || "Google Sign-in failed");
+      window.history.replaceState({}, document.title, window.location.pathname);
     }
-  }, [currentScreen]);
 
-  // Connects directly to Flask backend
+    checkAuthStatus();
+  }, []);
+
+  const checkAuthStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/auth/status`, { credentials: "include" });
+      if (res.ok) {
+        const data = await res.json();
+        setIsAuthenticated(data.authenticated);
+      }
+    } catch (e) {
+      console.warn("Could not check auth status", e);
+    }
+  };
+
+  const handleLogin = () => {
+    // Redirects to Flask's OAuth login route
+    window.location.href = `${API_BASE_URL}/login`;
+  };
+
   const handleSendMessage = async () => {
     if (inputValue.trim() === "" || isLoading) return;
-
     const userMessageText = inputValue;
     const userMessage = { sender: "user", text: userMessageText };
-    
-    // Add user message to UI & clear input
+
     setMessages((prev) => [...prev, userMessage]);
     setInputValue("");
     setIsLoading(true);
 
     try {
-      const response = await fetch("http://localhost:5000/api/chat", {
+      const response = await fetch(`${API_BASE_URL}/api/chat`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include", // Pass session cookie for authentication
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ message: userMessageText }),
       });
-
       const data = await response.json();
 
       if (response.ok) {
-        setMessages((prev) => [
-          ...prev,
-          { sender: "ai", text: data.reply }
-        ]);
+        setMessages((prev) => [...prev, { sender: "ai", text: data.reply }]);
       } else if (response.status === 401) {
         setMessages((prev) => [
           ...prev,
-          { 
-            sender: "ai", 
-            text: "You are not logged in with Google. Please log in first via http://localhost:5000/login to allow calendar access." 
-          }
+          {
+            sender: "ai",
+            text: "You are not logged in with Google. Please click 'Log in with Google' on the home page first.",
+          },
         ]);
       } else {
         setMessages((prev) => [
           ...prev,
-          { sender: "ai", text: `Error: ${data.error || "Something went wrong."}` }
+          { sender: "ai", text: data.error || "Sorry, I had trouble with that request." },
         ]);
       }
     } catch (error) {
       setMessages((prev) => [
         ...prev,
-        { sender: "ai", text: "Network error. Make sure your Flask backend is running on http://localhost:5000." }
+        { sender: "ai", text: "Network error connecting to Callie backend." },
       ]);
     } finally {
       setIsLoading(false);
@@ -94,26 +103,26 @@ function App() {
   };
 
   const handleKeyPress = (e) => {
-    if (e.key === "Enter") {
-      handleSendMessage();
-    }
+    if (e.key === "Enter") handleSendMessage();
   };
 
-  const todayDateFormatted = new Date().toLocaleDateString('en-US', { 
-    weekday: 'long', 
-    year: 'numeric', 
-    month: 'long', 
-    day: 'numeric' 
+  const todayDateFormatted = new Date().toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
   });
 
   return (
     <>
-      {/* HOME & PREFERENCES SCREEN */}
+      {authError && (
+        <div style={{ background: "#fee2e2", color: "#991b1b", padding: "12px", textAlign: "center" }}>
+          ⚠️ Auth Error: {authError}
+        </div>
+      )}
+
       {currentScreen === "home" && (
-        <div id="home-screen" style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%" }}>
+        <div>
           <div className="hero-container">
-            
-            {/* Background elements */}
             <div className="calendar-bg cal-1">
               <div className="cal-header"></div>
               <div className="cal-grid">
@@ -124,7 +133,6 @@ function App() {
                 <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
               </div>
             </div>
-
             <div className="calendar-bg cal-2">
               <div className="cal-header" style={{ width: "70%" }}></div>
               <div className="cal-grid">
@@ -153,18 +161,40 @@ function App() {
                 <button type="button" onClick={scrollToPreferences} className="btn-primary">
                   Get Started
                 </button>
-                <p className="login-hint">Sign up / Log in</p>
-                
-                {/* Direct link to Flask OAuth login */}
-                <a 
-                  href="http://localhost:5000/login" 
-                  style={{ display: "inline-block", margin: "10px 0", color: "#2563eb", fontWeight: "600" }}
-                >
-                  🔐 Log in with Google (Backend OAuth)
-                </a>
 
-                {/* Google Sign In button rendered here */}
-                <div id="buttonDiv" style={{ marginTop: "10px" }}></div>
+                {isAuthenticated ? (
+                  <div style={{ marginTop: "15px", color: "#059669", fontWeight: "600" }}>
+                    ✅ Google Calendar Connected!
+                    <button
+                      type="button"
+                      onClick={() => setCurrentScreen("chat")}
+                      className="btn-primary"
+                      style={{ display: "block", marginTop: "10px", padding: "10px 25px", fontSize: "16px" }}
+                    >
+                      Open Callie Chat &rarr;
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleLogin}
+                    style={{
+                      marginTop: "12px",
+                      background: "#fff",
+                      border: "1px solid #d1d5db",
+                      borderRadius: "12px",
+                      padding: "12px 24px",
+                      fontWeight: "600",
+                      color: "#1f2937",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "10px",
+                    }}
+                  >
+                    <span>🔐 Log in with Google Calendar</span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -175,12 +205,10 @@ function App() {
             <div className="g-form-card">
               <h2>Welcome! (New User)</h2>
               <p>Please tell us your scheduling preferences so we can optimize your calendar.</p>
-
               <div className="form-group">
                 <label>Sleep Schedule (Bedtime)</label>
                 <input type="time" defaultValue="23:00" />
               </div>
-
               <div className="form-group">
                 <label>Gym Schedule</label>
                 <div style={{ display: "flex", gap: "10px" }}>
@@ -194,7 +222,6 @@ function App() {
                   <input type="number" placeholder="Mins" style={{ width: "100px" }} />
                 </div>
               </div>
-
               <div className="form-group">
                 <label>Daily Meals</label>
                 <div style={{ display: "flex", gap: "10px" }}>
@@ -208,12 +235,11 @@ function App() {
                   <input type="number" placeholder="Mins" style={{ width: "100px" }} />
                 </div>
               </div>
-
               <div className="form-group">
                 <label>Typical Snack Time</label>
                 <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
                   <input type="time" defaultValue="16:00" disabled={isSnackDisabled} />
-                  <label style={{ display: "flex", alignItems: "center", gap: "5px", fontWeight: "normal", margin: "0", cursor: "pointer", color: "rgb(107, 114, 128)" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "5px", color: "rgb(107, 114, 128)" }}>
                     <input
                       type="checkbox"
                       style={{ width: "auto", margin: "0" }}
@@ -223,7 +249,6 @@ function App() {
                   </label>
                 </div>
               </div>
-
               <button
                 type="button"
                 onClick={() => {
@@ -236,41 +261,24 @@ function App() {
                 Save & Continue to Chat
               </button>
             </div>
-
-            <div className="footer">
-              <a href="#home">Home</a>
-              <a href="#privacy">Privacy Policy</a>
-              <a href="#contact">Contact us</a>
-            </div>
           </div>
         </div>
       )}
 
-      {/* CHAT SCREEN */}
       {currentScreen === "chat" && (
         <div className="chat-layout">
           <div className="chat-sidebar">
-            <button
-              type="button"
-              onClick={() => setCurrentScreen("home")}
-              className="btn-back"
-            >
+            <button type="button" onClick={() => setCurrentScreen("home")} className="btn-back">
               &larr; Back
             </button>
             <h1 className="logo sidebar-logo">GoCal</h1>
-
             <div className="mascot-section">
-              <div className="mascot-circle">
+              <div className={`mascot-circle ${isLoading ? "speaking" : ""}`}>
                 <span>Callie</span>
               </div>
-              <p className="mascot-text">
-                Keep Calm and ask Callie about your calendar
-              </p>
+              <p className="mascot-text">Keep Calm and ask Callie about your calendar</p>
             </div>
-
-            <div className="sidebar-date">
-              {todayDateFormatted}
-            </div>
+            <div className="sidebar-date">{todayDateFormatted}</div>
           </div>
 
           <div className="chat-main">
@@ -285,7 +293,7 @@ function App() {
               {isLoading && (
                 <div className="message-row ai-row">
                   <div className="message-bubble ai-bubble">
-                    <p style={{ fontStyle: "italic", opacity: 0.7 }}>Callie is thinking...</p>
+                    <p style={{ fontStyle: "italic", opacity: 0.7 }}>Callie is updating your schedule...</p>
                   </div>
                 </div>
               )}
@@ -301,12 +309,7 @@ function App() {
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyPress={handleKeyPress}
               />
-              <button 
-                type="button" 
-                className="btn-send" 
-                onClick={handleSendMessage}
-                disabled={isLoading}
-              >
+              <button type="button" className="btn-send" onClick={handleSendMessage} disabled={isLoading}>
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                 </svg>
