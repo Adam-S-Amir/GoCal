@@ -12,13 +12,10 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.getenv("SESSION_SECRET", "super_secret_dev_key_change_in_production")
 
-# Fix reverse proxy headers (CRITICAL on Render, Cloud Run, Heroku)
-# This ensures request.scheme and request.url accurately reflect https://
+# Fix reverse proxy headers (CRITICAL on Render for HTTPS)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
 
-# CRITICAL FOR CLOUD / RENDER AUTH:
-# When Google redirects back cross-site from accounts.google.com,
-# SameSite must be 'None' and Secure must be True so cookies are NOT dropped.
+# CRITICAL: SameSite=None + Secure=True allows cookies to persist across Google redirect
 app.config.update(
     SESSION_COOKIE_SAMESITE="None",
     SESSION_COOKIE_SECURE=True,
@@ -29,13 +26,28 @@ app.config.update(
 if os.getenv("FLASK_ENV") == "development" or os.getenv("LOCAL_DEV") == "1":
     os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
-# Enable CORS for frontend clients
-allowed_origins = [
-    origin.strip()
-    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
-    if origin.strip()
-]
-CORS(app, supports_credentials=True, origins=allowed_origins if allowed_origins else "*")
+# Bulletproof CORS: Echoes the frontend origin so cookies are always accepted
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get('Origin')
+    if origin:
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization'
+        response.headers['Access-Control-Allow-Methods'] = 'GET,POST,OPTIONS'
+    return response
+
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = app.make_default_options_response()
+        origin = request.headers.get('Origin')
+        if origin:
+            response.headers['Access-Control-Allow-Origin'] = origin
+            response.headers['Access-Control-Allow-Credentials'] = 'true'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization'
+            response.headers['Access-Control-Allow-Methods'] = 'GET,POST,OPTIONS'
+        return response
 
 def get_effective_redirect_uri():
     configured = os.getenv("GOOGLE_REDIRECT_URI")
@@ -52,53 +64,34 @@ def home():
 
 @app.route('/login')
 def login():
-    # Remember which frontend website the user came from
-    target = request.args.get('redirect_to') or request.referrer or os.getenv("FRONTEND_URL", "/")
+    # Save the frontend return URL
+    target = request.args.get('redirect_to') or request.referrer or os.getenv("FRONTEND_URL", "https://gocal-frontend.onrender.com")
     session['return_url'] = target
 
     redirect_uri = get_effective_redirect_uri()
     flow = get_oauth_flow(redirect_uri=redirect_uri)
+    flow.code_verifier = None  # Crucial: Disable PKCE code_verifier for Google Web client
+
     auth_url, state = flow.authorization_url(
         access_type='offline',
         prompt='consent',
         include_granted_scopes='true'
     )
     session['state'] = state
-    if flow.code_verifier:
-        session['code_verifier'] = flow.code_verifier
     return redirect(auth_url)
-
-@app.route('/api/auth/url')
-def auth_url():
-    redirect_uri = get_effective_redirect_uri()
-    flow = get_oauth_flow(redirect_uri=redirect_uri)
-    url, state = flow.authorization_url(
-        access_type='offline',
-        prompt='consent',
-        include_granted_scopes='true'
-    )
-    session['state'] = state
-    if flow.code_verifier:
-        session['code_verifier'] = flow.code_verifier
-    return jsonify({
-        'authUrl': url,
-        'redirectUri': redirect_uri
-    })
 
 @app.route('/api/auth/callback')
 def callback():
     state = session.get('state')
     redirect_uri = get_effective_redirect_uri()
 
-    # Reconstruct request URL with https if terminated by reverse proxy
     auth_response_url = request.url
     if request.headers.get('X-Forwarded-Proto') == 'https' and auth_response_url.startswith('http://'):
         auth_response_url = auth_response_url.replace('http://', 'https://', 1)
 
     try:
         flow = get_oauth_flow(state=state, redirect_uri=redirect_uri)
-        if session.get('code_verifier'):
-            flow.code_verifier = session.get('code_verifier')
+        flow.code_verifier = None  # Crucial: Prevents Google "(invalid_grant) code_verifier not needed" error
 
         flow.fetch_token(authorization_response=auth_response_url)
         creds = flow.credentials
@@ -112,9 +105,30 @@ def callback():
         }
 
         # Redirect user back to Callie's chat on the frontend
-        frontend_url = session.get('return_url') or os.getenv("FRONTEND_URL", "/")
+        frontend_url = session.get('return_url') or os.getenv("FRONTEND_URL", "https://gocal-frontend.onrender.com")
         separator = "&" if "?" in frontend_url else "?"
         return redirect(f"{frontend_url}{separator}auth=success")
+    except Exception as e:
+        print(f"[OAuth Callback Error]: {e}")
+        frontend_url = session.get('return_url') or os.getenv("FRONTEND_URL", "https://gocal-frontend.onrender.com")
+        separator = "&" if "?" in frontend_url else "?"
+        return redirect(f"{frontend_url}{separator}auth=error&error_details={str(e)}")
+
+@app.route('/api/auth/url')
+def auth_url():
+    redirect_uri = get_effective_redirect_uri()
+    flow = get_oauth_flow(redirect_uri=redirect_uri)
+    flow.code_verifier = None  # Crucial: Disable PKCE here too
+    url, state = flow.authorization_url(
+        access_type='offline',
+        prompt='consent',
+        include_granted_scopes='true'
+    )
+    session['state'] = state
+    return jsonify({
+        'authUrl': url,
+        'redirectUri': redirect_uri
+    })
 
 @app.route('/api/auth/status')
 def auth_status():
