@@ -117,10 +117,11 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
     now = datetime.datetime.now(ZoneInfo("America/New_York"))
 
     # Intent Detection
-    is_delete_intent = any(w in msg_lower for w in ["remove", "delete", "cancel"]) and not is_asking_for_schedule(msg_lower)
+    is_delete_intent = any(w in msg_lower for w in ["remove", "delete", "cancel", "take off"]) and not is_asking_for_schedule(msg_lower)
+    is_move_intent = any(w in msg_lower for w in ["move", "reschedule", "postpone", "push back", "shift", "change time"]) and not is_asking_for_schedule(msg_lower)
     is_free_time_query = any(w in msg_lower for w in ["free time", "open slot", "free slot", "open time", "when am i free"])
     is_schedule_query = is_asking_for_schedule(msg_lower)
-    is_create_intent = is_asking_to_create_event(msg_lower) and not is_schedule_query
+    is_create_intent = is_asking_to_create_event(msg_lower) and not is_schedule_query and not is_move_intent
 
     try:
         # 1. FREE TIME INTENT
@@ -158,7 +159,44 @@ Respond in character as Callie. Lay out their schedule in a clean vertical colum
             fallback = f"Here is what's on your schedule:\n\n{events}"
             reply = safe_generate_content(client, prompt, fallback_text=fallback)
 
-        # 3. ADD / SCHEDULE EVENT INTENT (Write query)
+        # 3. MOVE / RESCHEDULE EVENT INTENT
+        elif is_move_intent:
+            extract_prompt = f"""Extract the event title to move and its target start time.
+Current time: {now.strftime("%A, %B %d, %Y %I:%M %p")} EDT.
+User request: "{user_message}"
+Output ONLY a raw JSON object with no markdown:
+{{"title": "Title of event to move", "new_start_time": "YYYY-MM-DDTHH:MM:SS-04:00"}}"""
+            raw_text = safe_generate_content(client, extract_prompt, fallback_text="")
+            if "```" in raw_text:
+                raw_text = re.sub(r"```(json)?", "", raw_text).strip()
+            try:
+                data = json.loads(raw_text)
+                title = data.get("title", "").strip()
+                new_start = data.get("new_start_time", "").strip()
+                if title and new_start:
+                    reply = gemini_calander.move_event(title, new_start)
+                else:
+                    reply = f"I'd love to reschedule that for you! What new time and date should I move it to?"
+            except Exception:
+                reply = "I'm ready to move that event! Could you tell me the new date and time you'd like?"
+
+        # 4. REMOVE / CANCEL EVENT INTENT
+        elif is_delete_intent:
+            extract_prompt = f"""Extract the event title to remove from: "{user_message}".
+Output ONLY raw JSON: {{"title": "Title to remove"}}"""
+            raw_text = safe_generate_content(client, extract_prompt, fallback_text="")
+            if "```" in raw_text:
+                raw_text = re.sub(r"```(json)?", "", raw_text).strip()
+            try:
+                data = json.loads(raw_text)
+                title = data.get("title", "").strip()
+                if not title:
+                    title = re.sub(r'\b(remove|delete|cancel|clear|please|my|the)\b', '', user_message, flags=re.IGNORECASE).strip()
+                reply = gemini_calander.remove_event(title)
+            except Exception:
+                reply = "Which event title would you like me to remove from your calendar?"
+
+        # 5. ADD / SCHEDULE EVENT INTENT (Write query)
         elif is_create_intent:
             extract_prompt = f"""Extract the event details from this user request.
 Current time: {now.strftime("%A, %B %d, %Y %I:%M %p")} EDT.
@@ -173,7 +211,6 @@ Output ONLY a raw JSON object with no markdown:
                 event_data = json.loads(raw_text)
                 summary = event_data.get("summary", "New Event").strip()
 
-                # Safety check: Prevent creating dummy / hallucinated schedule queries
                 if summary.lower() in FORBIDDEN_SUMMARIES or "schedule" in summary.lower():
                     events = gemini_calander.get_day_summary("today")
                     reply = f"Here is what is currently on your schedule:\n\n{events}"
@@ -193,21 +230,7 @@ Output ONLY a raw JSON object with no markdown:
             except Exception:
                 reply = "I'm ready to schedule that! Could you confirm the exact start time and day?"
 
-        # 4. REMOVE / CANCEL EVENT INTENT
-        elif is_delete_intent:
-            extract_prompt = f"""Extract the event title to remove from: "{user_message}".
-Output ONLY raw JSON: {{"title": "Title to remove"}}"""
-            raw_text = safe_generate_content(client, extract_prompt, fallback_text="")
-            if "```" in raw_text:
-                raw_text = re.sub(r"```(json)?", "", raw_text).strip()
-            try:
-                data = json.loads(raw_text)
-                title = data.get("title", "")
-                reply = gemini_calander.remove_event(title)
-            except Exception:
-                reply = "Which event title would you like me to remove from your calendar?"
-
-        # 5. GENERAL CONVERSATION & GREETINGS ("hi", "how are you", chat)
+        # 6. GENERAL CONVERSATION & GREETINGS
         else:
             context = ""
             if history:

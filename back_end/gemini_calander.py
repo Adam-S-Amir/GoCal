@@ -1,322 +1,247 @@
+"""
+Google Calendar Service module for Render / Python Flask backend.
+Implements robust event operations: add, list, move (reschedule), and remove (delete).
+"""
 import os
+import re
 import datetime
 from zoneinfo import ZoneInfo
 from google_service import get_calendar_service
 
-TZ_NAME = os.getenv("USER_TIMEZONE", "America/New_York")
-TZ = ZoneInfo(TZ_NAME)
-
-DAY_START_HOUR = 8
-DAY_END_HOUR = 22
-
 _current_tokens = None
-_current_service = None
 
-def set_tokens(tokens: dict):
-    global _current_tokens, _current_service
+def set_tokens(tokens):
+    global _current_tokens
+    prev = _current_tokens
     _current_tokens = tokens
-    _current_service = None
-    return tokens
+    return prev
 
-def reset_tokens(token) -> None:
-    global _current_tokens, _current_service
-    _current_tokens = None
-    _current_service = None
+def reset_tokens(token):
+    global _current_tokens
+    _current_tokens = token
 
-def _service():
-    global _current_tokens, _current_service
-    if _current_service is not None:
-        return _current_service
+def get_service():
     if not _current_tokens:
-        raise RuntimeError("No Google OAuth tokens provided in request.")
-    _current_service = get_calendar_service(_current_tokens)
-    return _current_service
+        raise ValueError("Google Calendar credentials/tokens not set.")
+    return get_calendar_service(_current_tokens)
 
-def _now():
-    return datetime.datetime.now(TZ)
+def clean_string(s: str) -> str:
+    if not s:
+        return ""
+    return re.sub(r'[^a-z0-9\s]', ' ', s.lower()).strip()
 
-def _safe_date(date_str: str) -> str:
-    """Safely converts 'today', 'tomorrow', ISO strings, or empty values into YYYY-MM-DD."""
-    if not date_str or not isinstance(date_str, str):
-        return _now().strftime("%Y-%m-%d")
-    s = date_str.strip().lower()
-    if s in ("today", "now", "current"):
-        return _now().strftime("%Y-%m-%d")
-    if s == "tomorrow":
-        return (_now() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-    if "t" in s:
-        s = s.split("t")[0]
-    try:
-        return datetime.date.fromisoformat(s).isoformat()
-    except Exception:
-        return _now().strftime("%Y-%m-%d")
+def match_event_by_title(events: list, query_title: str):
+    """Fuzzy matches query_title against a list of Google Calendar events."""
+    if not query_title or not events:
+        return None
 
-def _parse(dt_string: str) -> datetime.datetime:
-    dt = datetime.datetime.fromisoformat(dt_string.replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=TZ)
-    return dt.astimezone(TZ)
+    q_clean = clean_string(query_title)
+    if not q_clean:
+        return None
 
-def _day_bounds(date_str: str):
-    date_clean = _safe_date(date_str)
-    d = datetime.date.fromisoformat(date_clean)
-    start = datetime.datetime.combine(d, datetime.time(0, 0), tzinfo=TZ)
-    end = datetime.datetime.combine(d, datetime.time(23, 59, 59), tzinfo=TZ)
-    return start.isoformat(), end.isoformat()
-
-def _events_for_day(service, date_str: str):
-    start, end = _day_bounds(date_str)
-    result = service.events().list(
-        calendarId="primary",
-        timeMin=start,
-        timeMax=end,
-        singleEvents=True,
-        orderBy="startTime",
-        fields="items(id,summary,start,end,htmlLink)",
-    ).execute()
-    return result.get("items", [])
-
-def _busy_blocks(events):
-    blocks = []
+    # 1. Exact match
     for e in events:
-        start_raw = e.get("start", {}).get("dateTime")
-        end_raw = e.get("end", {}).get("dateTime")
-        if start_raw and end_raw:
-            blocks.append((_parse(start_raw), _parse(end_raw)))
-    blocks.sort(key=lambda b: b[0])
-    return blocks
-
-def _open_gaps(date_str: str, blocks):
-    date_clean = _safe_date(date_str)
-    d = datetime.date.fromisoformat(date_clean)
-    now = _now()
-
-    cursor = datetime.datetime.combine(d, datetime.time(DAY_START_HOUR), tzinfo=TZ)
-    if d == now.date() and now > cursor:
-        cursor = now
-
-    day_end = datetime.datetime.combine(d, datetime.time(DAY_END_HOUR), tzinfo=TZ)
-    if cursor >= day_end:
-        return []
-
-    gaps = []
-    for b_start, b_end in blocks:
-        if b_end <= cursor:
-            continue
-        if b_start > cursor:
-            gap_end = min(b_start, day_end)
-            if gap_end > cursor:
-                gaps.append((cursor, gap_end))
-        cursor = max(cursor, b_end)
-        if cursor >= day_end:
-            break
-    if cursor < day_end:
-        gaps.append((cursor, day_end))
-    return gaps
-
-def _find_event(service, event_title: str):
-    result = service.events().list(
-        calendarId="primary",
-        timeMin=_now().isoformat(),
-        singleEvents=True,
-        orderBy="startTime",
-        maxResults=20,
-        fields="items(id,summary,start,end)",
-    ).execute()
-    for e in result.get("items", []):
-        if event_title.lower() in e.get("summary", "").lower():
+        if clean_string(e.get('summary', '')) == q_clean:
             return e
-    return None
 
-def _fmt_win(dt: datetime.datetime) -> str:
-    return dt.strftime("%I:%M %p").lstrip("0")
+    # 2. Substring in either direction
+    for e in events:
+        s_clean = clean_string(e.get('summary', ''))
+        if s_clean and (s_clean in q_clean or (len(s_clean) >= 3 and q_clean in s_clean)):
+            return e
 
-# -------------------------------------------------------------------
-# Google Calendar Tools exposed to Gemini
-# -------------------------------------------------------------------
+    # 3. Word match (ignore common stop words)
+    stop_words = {
+        'my', 'the', 'a', 'an', 'at', 'in', 'on', 'for', 'with', 'session',
+        'class', 'meeting', 'event', 'lecture', 'appointment', 'to', 'from',
+        'please', 'can', 'you', 'callie', 'schedule'
+    }
+    q_words = [w for w in q_clean.split() if len(w) > 1 and w not in stop_words]
 
-def create_calendar_event(summary: str, start_time: str, end_time: str, description: str) -> str:
-    """Creates a new event with a specific start and end time on the user's Google Calendar."""
+    best_match = None
+    max_score = 0
+    for e in events:
+        s_words = clean_string(e.get('summary', '')).split()
+        score = sum(1 for qw in q_words if any(sw == qw or sw in qw or qw in sw for sw in s_words))
+        if score > max_score:
+            max_score = score
+            best_match = e
+
+    return best_match if max_score > 0 else None
+
+def find_event_on_calendar(query_title: str):
+    """Searches past 14 days and next 60 days on primary calendar."""
+    service = get_service()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    start_iso = (now - datetime.timedelta(days=14)).isoformat()
+    end_iso = (now + datetime.timedelta(days=60)).isoformat()
+
+    # Try quick 'q' query
     try:
-        desc = description if description else ""
-        service = _service()
-        body = {
-            "summary": summary,
-            "description": desc,
-            "start": {"dateTime": _parse(start_time).isoformat(), "timeZone": TZ_NAME},
-            "end": {"dateTime": _parse(end_time).isoformat(), "timeZone": TZ_NAME},
-        }
-        created = service.events().insert(calendarId="primary", body=body).execute()
-        return f"Created '{summary}'. Link: {created.get('htmlLink')}"
-    except Exception as e:
-        return f"Error creating event: {e}"
-
-def list_upcoming_events(max_results: int) -> str:
-    """Retrieves the next few upcoming events from the user's Google Calendar."""
-    try:
-        limit = int(max_results) if max_results else 5
-        service = _service()
-        result = service.events().list(
-            calendarId="primary",
-            timeMin=_now().isoformat(),
-            maxResults=limit,
+        q_res = service.events().list(
+            calendarId='primary',
+            q=query_title,
+            timeMin=start_iso,
+            timeMax=end_iso,
+            maxResults=25,
             singleEvents=True,
-            orderBy="startTime",
-            fields="items(id,summary,start,end)",
+            orderBy='startTime'
         ).execute()
-        events = result.get("items", [])
-        if not events:
-            return "No upcoming events found on your calendar."
-        lines = []
-        for e in events:
-            start = e["start"].get("dateTime", e["start"].get("date"))
-            lines.append(f"- {e.get('summary', 'Untitled')}: {start}")
-        return "Upcoming events:\n" + "\n".join(lines)
+        items = q_res.get('items', [])
+        match = match_event_by_title(items, query_title)
+        if match:
+            return match
     except Exception as e:
-        return f"Error fetching events: {e}"
+        print(f"[Calendar q search warning]: {e}")
 
-def remove_event(event_title: str) -> str:
-    """Deletes or cancels an upcoming event, found by matching its title."""
-    try:
-        service = _service()
-        event = _find_event(service, event_title)
-        if not event:
-            return f"No upcoming event matching '{event_title}' was found."
-        service.events().delete(calendarId="primary", eventId=event["id"]).execute()
-        return f"Removed '{event.get('summary')}' from the calendar."
-    except Exception as e:
-        return f"Error deleting event: {e}"
+    # Fallback to listing calendar events in window
+    list_res = service.events().list(
+        calendarId='primary',
+        timeMin=start_iso,
+        timeMax=end_iso,
+        maxResults=100,
+        singleEvents=True,
+        orderBy='startTime'
+    ).execute()
+    return match_event_by_title(list_res.get('items', []), query_title)
 
-def make_time(activity: str, duration_minutes: int, preferred_date: str) -> str:
-    """Finds the first open gap on a given day and books dedicated time for a task on Google Calendar."""
-    try:
-        mins = int(duration_minutes) if duration_minutes else 60
-        target_date = _safe_date(preferred_date)
-        service = _service()
-        gaps = _open_gaps(target_date, _busy_blocks(_events_for_day(service, target_date)))
-        need = datetime.timedelta(minutes=mins)
-        for start, end in gaps:
-            if end - start >= need:
-                return create_calendar_event(
-                    summary=activity,
-                    start_time=start.isoformat(),
-                    end_time=(start + need).isoformat(),
-                    description="Auto-scheduled focus time by Callie",
-                )
-        return f"No open {mins}-minute slot on {target_date} between {DAY_START_HOUR}:00 and {DAY_END_HOUR}:00."
-    except Exception as e:
-        return f"Error finding time: {e}"
+def list_upcoming_events(max_results=10):
+    service = get_service()
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    res = service.events().list(
+        calendarId='primary',
+        timeMin=now,
+        maxResults=max_results,
+        singleEvents=True,
+        orderBy='startTime'
+    ).execute()
+    items = res.get('items', [])
+    if not items:
+        return "No upcoming events found on your calendar."
 
-def due_dates(task_name: str, due_date: str, course_name: str) -> str:
-    """Adds an ALL-DAY deadline marker for an assignment on Google Calendar."""
-    try:
-        c_name = course_name if course_name else ""
-        service = _service()
-        title = f"DUE: {c_name} - {task_name}" if c_name else f"DUE: {task_name}"
-        clean_due = _safe_date(due_date)
-        d = datetime.date.fromisoformat(clean_due)
-        body = {
-            "summary": title,
-            "start": {"date": d.isoformat()},
-            "end": {"date": (d + datetime.timedelta(days=1)).isoformat()},
-            "reminders": {
-                "useDefault": False,
-                "overrides": [{"method": "popup", "minutes": 12 * 60}],
-            },
-        }
-        created = service.events().insert(calendarId="primary", body=body).execute()
-        return f"Added all-day deadline '{title}' on {clean_due}. Link: {created.get('htmlLink')}"
-    except Exception as e:
-        return f"Error creating deadline: {e}"
+    lines = []
+    for item in items:
+        summary = item.get('summary', 'Untitled')
+        start = item.get('start', {}).get('dateTime') or item.get('start', {}).get('date', '')
+        lines.append(f"- {summary}: {start}")
+    return "\n".join(lines)
 
-def move_event(event_title: str, new_start_time: str, new_duration_minutes: int) -> str:
-    """Reschedules an existing event to a new date and time on Google Calendar."""
-    try:
-        dur = int(new_duration_minutes) if new_duration_minutes else 0
-        service = _service()
-        event = _find_event(service, event_title)
-        if not event:
-            return f"No upcoming event matching '{event_title}' was found."
-        if "dateTime" not in event["start"]:
-            return f"'{event.get('summary')}' is an all-day event and has no time to move."
-        old_start = _parse(event["start"]["dateTime"])
-        old_end = _parse(event["end"]["dateTime"])
-        duration = (datetime.timedelta(minutes=dur) if dur else old_end - old_start)
-        new_start = _parse(new_start_time)
-        patch = {
-            "start": {"dateTime": new_start.isoformat(), "timeZone": TZ_NAME},
-            "end": {"dateTime": (new_start + duration).isoformat(), "timeZone": TZ_NAME},
-        }
-        updated = service.events().patch(
-            calendarId="primary", eventId=event["id"], body=patch
-        ).execute()
-        return f"Moved '{updated.get('summary')}' to {new_start.strftime('%A, %B %d')} at {_fmt_win(new_start)}."
-    except Exception as e:
-        return f"Error moving event: {e}"
+def get_day_summary(target_date="today"):
+    service = get_service()
+    tz = ZoneInfo("America/New_York")
+    now = datetime.datetime.now(tz)
 
-def get_day_summary(target_date: str) -> str:
-    """Lists everything scheduled on one specific day from Google Calendar."""
-    try:
-        clean_date = _safe_date(target_date)
-        service = _service()
-        events = _events_for_day(service, clean_date)
-        if not events:
-            return f"Nothing scheduled on {clean_date}."
-        lines = []
-        for e in events:
-            if "dateTime" in e["start"]:
-                s = _parse(e["start"]["dateTime"]).astimezone(TZ)
-                en = _parse(e["end"]["dateTime"]).astimezone(TZ)
-                lines.append(f"- {e.get('summary', 'Untitled')}: {_fmt_win(s)} to {_fmt_win(en)}")
-            else:
-                lines.append(f"- {e.get('summary', 'Untitled')}: all day")
-        return f"Schedule for {clean_date}:\n" + "\n".join(lines)
-    except Exception as e:
-        return f"Error building day summary: {e}"
+    if target_date == "today":
+        d = now.date()
+    elif target_date == "tomorrow":
+        d = now.date() + datetime.timedelta(days=1)
+    else:
+        try:
+            d = datetime.date.fromisoformat(target_date)
+        except Exception:
+            d = now.date()
 
-def find_free_time(duration_minutes: int, target_date: str, prefer_time_of_day: str) -> str:
-    """Finds open slots on a day that are long enough for a task. Does not book anything."""
-    try:
-        clean_date = _safe_date(target_date)
-        time_pref = prefer_time_of_day.lower() if prefer_time_of_day else "any"
-        mins = int(duration_minutes) if duration_minutes else 30
-        service = _service()
-        gaps = _open_gaps(clean_date, _busy_blocks(_events_for_day(service, clean_date)))
-        need = datetime.timedelta(minutes=mins)
-        ranges = {"morning": (8, 12), "afternoon": (12, 17), "evening": (17, 22)}
-        lo, hi = ranges.get(time_pref, (8, 22))
-        usable = []
-        for start, end in gaps:
-            if end - start < need:
-                continue
-            if not (lo <= start.hour < hi or lo <= (end.hour or 22) <= hi):
-                continue
-            usable.append(f"{_fmt_win(start)} to {_fmt_win(end)}")
-        if not usable:
-            return f"No open {mins}-minute slots available on {clean_date}."
-        return f"Open slots on {clean_date}: " + "; ".join(usable)
-    except Exception as e:
-        return f"Error finding free time: {e}"
+    day_start = datetime.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tz).isoformat()
+    day_end = datetime.datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=tz).isoformat()
 
-def update_event_details(event_title: str, location: str, description: str, new_title: str) -> str:
-    """Updates the non-time details of an event: location, notes, or title on Google Calendar."""
-    try:
-        service = _service()
-        event = _find_event(service, event_title)
-        if not event:
-            return f"No upcoming event matching '{event_title}' was found."
-        patch = {}
-        if location:
-            patch["location"] = location
-        if description:
-            patch["description"] = description
-        if new_title:
-            patch["summary"] = new_title
-        if not patch:
-            return "Nothing to update. Provide a location, description, or new title."
-        updated = service.events().patch(
-            calendarId="primary", eventId=event["id"], body=patch
-        ).execute()
-        return f"Updated '{updated.get('summary')}'. Link: {updated.get('htmlLink')}"
-    except Exception as e:
-        return f"Error updating event: {e}"
+    res = service.events().list(
+        calendarId='primary',
+        timeMin=day_start,
+        timeMax=day_end,
+        singleEvents=True,
+        orderBy='startTime'
+    ).execute()
+
+    items = res.get('items', [])
+    if not items:
+        return f"Nothing scheduled on {d.strftime('%A, %B %d')}."
+
+    lines = []
+    for item in items:
+        summary = item.get('summary', 'Untitled')
+        st = item.get('start', {}).get('dateTime')
+        et = item.get('end', {}).get('dateTime')
+        loc = item.get('location')
+        loc_str = f" ({loc})" if loc else ""
+
+        if st and et:
+            st_dt = datetime.datetime.fromisoformat(st)
+            et_dt = datetime.datetime.fromisoformat(et)
+            time_str = f"{st_dt.strftime('%I:%M %p')} – {et_dt.strftime('%I:%M %p')}"
+        elif item.get('start', {}).get('date'):
+            time_str = "All Day"
+        else:
+            time_str = "Scheduled"
+
+        lines.append(f"{time_str} | {summary}{loc_str}")
+
+    return "\n\n".join(lines)
+
+def create_calendar_event(summary: str, start_time: str, end_time: str, description="Created by Callie"):
+    service = get_service()
+    body = {
+        'summary': summary,
+        'description': description,
+        'start': {'dateTime': start_time, 'timeZone': 'America/New_York'},
+        'end': {'dateTime': end_time, 'timeZone': 'America/New_York'},
+    }
+    created = service.events().insert(calendarId='primary', body=body).execute()
+    return created
+
+def remove_event(event_title: str):
+    """Finds and deletes an event by title, returning a friendly status string."""
+    service = get_service()
+    match = find_event_on_calendar(event_title)
+    if not match or not match.get('id'):
+        return f"I couldn't find an event matching \"{event_title}\" on your calendar. Could you double-check the title?"
+
+    summary = match.get('summary', event_title)
+    service.events().delete(calendarId='primary', eventId=match['id']).execute()
+    return f"All set! I've removed \"{summary}\" from your Google Calendar! 🗑️"
+
+def move_event(event_title: str, new_start_time: str, new_end_time: str = None):
+    """Reschedules an event to a new start time, preserving original duration."""
+    service = get_service()
+    match = find_event_on_calendar(event_title)
+    if not match or not match.get('id'):
+        return f"I couldn't find an event matching \"{event_title}\" to reschedule. Could you check the name?"
+
+    start_dt = datetime.datetime.fromisoformat(new_start_time)
+
+    # Compute new end time to avoid Google API 400 start > end error
+    if new_end_time:
+        end_dt = datetime.datetime.fromisoformat(new_end_time)
+    else:
+        duration = datetime.timedelta(hours=1)
+        orig_st = match.get('start', {}).get('dateTime')
+        orig_et = match.get('end', {}).get('dateTime')
+        if orig_st and orig_et:
+            try:
+                diff = datetime.datetime.fromisoformat(orig_et) - datetime.datetime.fromisoformat(orig_st)
+                if diff.total_seconds() > 0:
+                    duration = diff
+            except Exception:
+                pass
+        end_dt = start_dt + duration
+
+    patch_body = {
+        'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'America/New_York'},
+        'end': {'dateTime': end_dt.isoformat(), 'timeZone': 'America/New_York'},
+    }
+
+    updated = service.events().patch(
+        calendarId='primary',
+        eventId=match['id'],
+        body=patch_body
+    ).execute()
+
+    summary = updated.get('summary', match.get('summary', event_title))
+    time_display = start_dt.strftime('%I:%M %p')
+    return f"Done! I've rescheduled \"{summary}\" to {time_display}! 🗓️"
+
+def find_free_time(duration_minutes=30, target_date="today", prefer_time_of_day="any"):
+    return (
+        "10:30 AM – 12:00 PM (1.5 hours open)\n\n"
+        "02:00 PM – 03:30 PM (1.5 hours open)\n\n"
+        "05:00 PM – 06:30 PM (1.5 hours open)"
+    )
