@@ -12,18 +12,16 @@ load_dotenv()
 
 from google.genai import types
 
-PRIMARY_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+FALLBACK_MODEL = "gemini-1.5-flash"
 
-# Smart, highly capable models with zero/low latency
-CANDIDATE_MODELS = [
-    PRIMARY_MODEL,
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-flash-latest",
-    "gemini-3.1-flash-lite",
-]
-seen = set()
-MODEL_CASCADE = [m for m in CANDIDATE_MODELS if m and not (m in seen or seen.add(m))]
+_genai_client = None
+
+def get_genai_client(api_key: str):
+    global _genai_client
+    if _genai_client is None:
+        _genai_client = genai.Client(api_key=api_key)
+    return _genai_client
 
 FORBIDDEN_SUMMARIES = {
     "retrieve user schedule",
@@ -70,78 +68,20 @@ FORMATTING RULES FOR SCHEDULES (SPACED VERTICAL COLUMN, NO RAW ASTERISKS):
 - Keep opening and closing commentary friendly and brief so the schedule column stands out clearly.
 """
 
-def _call_genai_fast(client, model_name: str, prompt: str) -> str | None:
-    """
-    Calls Gemini while disabling or minimizing internal reasoning/thinking tokens.
-    Without this, Gemini 2.5/3.x models spend 30-45 seconds generating internal
-    thinking chains before outputting any text. With thinking_budget=0, responses take ~1-2 seconds.
-    """
-    # Strategy 1: thinking_budget=0 (Gemini 2.5 and Flash series: instant response)
+def safe_generate_content(client, prompt: str, fallback_text: str = "") -> str:
+    """Direct, single-hop execution using gemini-2.0-flash (~500ms). Falls back to gemini-1.5-flash on error."""
     try:
-        if hasattr(types, "ThinkingConfig") and hasattr(types, "GenerateContentConfig"):
-            config = types.GenerateContentConfig(
-                temperature=0.3,
-                max_output_tokens=1000,
-                thinking_config=types.ThinkingConfig(thinking_budget=0)
-            )
-            res = client.models.generate_content(model=model_name, contents=prompt, config=config)
-            if res and res.text:
-                return res.text.strip()
-    except Exception:
-        pass
-
-    # Strategy 2: thinking_level="LOW" (for models requiring thinking_level instead of thinking_budget)
-    try:
-        if hasattr(types, "ThinkingConfig") and hasattr(types, "GenerateContentConfig"):
-            config = types.GenerateContentConfig(
-                temperature=0.3,
-                max_output_tokens=1000,
-                thinking_config=types.ThinkingConfig(thinking_level="LOW")
-            )
-            res = client.models.generate_content(model=model_name, contents=prompt, config=config)
-            if res and res.text:
-                return res.text.strip()
-    except Exception:
-        pass
-
-    # Strategy 3: Standard GenerateContentConfig with temperature & max_tokens (for gemini-2.0-flash / legacy)
-    try:
-        if hasattr(types, "GenerateContentConfig"):
-            config = types.GenerateContentConfig(
-                temperature=0.3,
-                max_output_tokens=1000
-            )
-            res = client.models.generate_content(model=model_name, contents=prompt, config=config)
-            if res and res.text:
-                return res.text.strip()
-    except Exception:
-        pass
-
-    # Strategy 4: Fallback standard invocation
-    try:
-        res = client.models.generate_content(model=model_name, contents=prompt)
+        res = client.models.generate_content(model=MODEL, contents=prompt)
         if res and res.text:
             return res.text.strip()
     except Exception as e:
-        print(f"[{model_name} failed all strategies]: {e}")
-
-    return None
-
-def safe_generate_content(client, prompt: str, fallback_text: str = "") -> str:
-    """Tries models in cascade with thinking delay disabled so responses take ~1-2 seconds."""
-    for model_name in MODEL_CASCADE:
-        for attempt in range(2):
-            try:
-                res = _call_genai_fast(client, model_name, prompt)
-                if res:
-                    return res
-            except Exception as e:
-                err_str = str(e)
-                if ("503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str) and attempt < 1:
-                    time.sleep(0.5)
-                    continue
-                print(f"[{model_name} attempt {attempt+1} error]: {err_str}")
-                break
+        print(f"[{MODEL} direct error]: {e}")
+        try:
+            res = client.models.generate_content(model=FALLBACK_MODEL, contents=prompt)
+            if res and res.text:
+                return res.text.strip()
+        except Exception as e2:
+            print(f"[{FALLBACK_MODEL} fallback error]: {e2}")
     return fallback_text
 
 def is_asking_for_schedule(msg_lower: str) -> bool:
@@ -183,7 +123,7 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
     if not api_key:
         return "Error: GEMINI_API_KEY is missing from the .env file.", history or []
 
-    client = genai.Client(api_key=api_key)
+    client = get_genai_client(api_key)
     reset_token = gemini_calander.set_tokens(tokens)
     msg_lower = user_message.lower().strip()
     now = datetime.datetime.now(ZoneInfo("America/New_York"))

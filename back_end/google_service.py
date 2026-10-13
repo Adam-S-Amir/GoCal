@@ -25,11 +25,17 @@ def get_oauth_flow(state=None, redirect_uri=None):
         client_config,
         scopes=SCOPES,
         redirect_uri=effective_redirect,
-        state=state,
-        autogenerate_code_verifier=False  # Disables PKCE code_verifier completely
+        state=state
     )
 
+_service_cache = {}
+
 def get_calendar_service(tokens):
+    # Cache the built service client by access_token to prevent repeated discovery doc downloads
+    cache_key = tokens.get('access_token') or tokens.get('refresh_token')
+    if cache_key and cache_key in _service_cache:
+        return _service_cache[cache_key]
+
     creds = Credentials(
         token=tokens.get('access_token'),
         refresh_token=tokens.get('refresh_token'),
@@ -37,4 +43,14 @@ def get_calendar_service(tokens):
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
         client_secret=os.getenv("GOOGLE_CLIENT_SECRET")
     )
-    return build('calendar', 'v3', credentials=creds)
+    try:
+        service = build('calendar', 'v3', credentials=creds, static_discovery=False)
+    except Exception:
+        service = build('calendar', 'v3', credentials=creds)
+
+    if cache_key:
+        if len(_service_cache) > 20:
+            _service_cache.clear()
+        _service_cache[cache_key] = service
+
+    return service

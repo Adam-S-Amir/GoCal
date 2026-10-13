@@ -210,13 +210,13 @@ def find_event_on_calendar(query_title: str, time_hint: str = None, date_hint: s
 
     # Pass 1: Today & Future events (closest first)
     today_start = today_midnight.isoformat()
-    future_end = (now_ny + datetime.timedelta(days=60)).isoformat()
+    future_end = (now_ny + datetime.timedelta(days=30)).isoformat()
     try:
         res = service.events().list(
             calendarId='primary',
             timeMin=today_start,
             timeMax=future_end,
-            maxResults=100,
+            maxResults=30,
             singleEvents=True,
             orderBy='startTime'
         ).execute()
@@ -233,7 +233,7 @@ def find_event_on_calendar(query_title: str, time_hint: str = None, date_hint: s
             calendarId='primary',
             timeMin=past_start,
             timeMax=today_start,
-            maxResults=50,
+            maxResults=25,
             singleEvents=True,
             orderBy='startTime'
         ).execute()
