@@ -265,6 +265,12 @@ def list_upcoming_events(max_results=10):
     lines = []
     for item in items:
         summary = item.get('summary', 'Untitled')
+        if summary.lower().strip() in {
+            "retrieve user schedule", "check schedule", "get schedule",
+            "user schedule", "my schedule", "check calendar", "view schedule",
+            "schedule", "agenda", "calendar"
+        }:
+            continue
         start = item.get('start', {}).get('dateTime') or item.get('start', {}).get('date', '')
         lines.append(f"- {summary}: {start}")
     return "\n".join(lines)
@@ -302,6 +308,12 @@ def get_day_summary(target_date="today"):
     lines = []
     for item in items:
         summary = item.get('summary', 'Untitled')
+        if summary.lower().strip() in {
+            "retrieve user schedule", "check schedule", "get schedule",
+            "user schedule", "my schedule", "check calendar", "view schedule",
+            "schedule", "agenda", "calendar"
+        }:
+            continue
         st = item.get('start', {}).get('dateTime')
         et = item.get('end', {}).get('dateTime')
         loc = item.get('location')
@@ -422,6 +434,7 @@ def chat_with_callie(user_message: str, tokens: dict = None, history: list = Non
     from ai_assistant import process_prompt
     effective_tokens = tokens or _current_tokens
     return process_prompt(user_message, effective_tokens, history or [])
+
 
 
 
