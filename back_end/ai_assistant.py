@@ -9,8 +9,9 @@ import gemini_calander
 
 load_dotenv()
 
-# Fast, load-balanced model alias
-MODEL = "gemini-flash-latest"
+# gemini-3.1-flash-lite has high availability and responds in under 1 second
+PRIMARY_MODEL = "gemini-3.1-flash-lite"
+FALLBACK_MODEL = "gemini-3.8-flash"
 
 CALENDAR_TOOLS = [
     gemini_calander.create_calendar_event,
@@ -26,23 +27,11 @@ CALENDAR_TOOLS = [
 
 def build_system_instruction() -> str:
     now = datetime.datetime.now(ZoneInfo("America/New_York"))
-    # Streamlined prompt: cuts prompt prefill tokens in half for fast generation
     return f"""
-    You are Callie, a fast, cheerful calendar assistant for a student.
-    Current time: {now.strftime("%A, %B %d, %Y %I:%M %p")} (America/New_York).
-    Tone: Friendly, witty, and concise.
-    Formatting rules:
-    - Keep answers brief and cleanly formatted with line breaks.
-    - Example:
-      9:00 AM - Class
-      1:00 PM - Lunch
-      4:00 PM - Gym
-    Tool rules:
-    - Specific start time given -> create_calendar_event
-    - Assignment deadline with no time -> due_dates
-    - Block open focus time -> make_time or find_free_time
-    - Check day -> get_day_summary or list_upcoming_events
-    Always confirm what was scheduled or found.
+    You are Callie, an energetic, cheerful, and witty calendar assistant for a student.
+    Current date & time: {now.strftime("%A, %B %d, %Y %I:%M %p")} (America/New_York).
+    Your name is Callie. Be friendly, helpful, and concise with clean line breaks for schedules.
+    When asked about schedules, check calendar tools first. If it's a general greeting, respond warmly without calling tools.
     """
 
 def process_prompt(user_message: str, tokens: dict, history: list[dict] | None = None):
@@ -53,7 +42,6 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
     client = genai.Client(api_key=api_key)
     reset_token = gemini_calander.set_tokens(tokens)
 
-    # Keep conversation context concise
     prompt = user_message
     valid_history = [
         t for t in (history or [])
@@ -65,45 +53,50 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
             context_str = "\n".join(recent_turns)
             prompt = f"Previous context:\n{context_str}\n\nUser: {user_message}"
 
+    # Try fast model first, then fallback model
+    models_to_try = [PRIMARY_MODEL, FALLBACK_MODEL]
+
+    for m in models_to_try:
+        try:
+            chat = client.chats.create(
+                model=m,
+                config=types.GenerateContentConfig(
+                    system_instruction=build_system_instruction(),
+                    tools=CALENDAR_TOOLS,
+                    temperature=0.1,
+                )
+            )
+
+            response = chat.send_message(prompt)
+            reply = response.text or "I've checked and updated your calendar!"
+
+            new_history = list(valid_history)
+            new_history.append({"role": "user", "text": user_message})
+            new_history.append({"role": "model", "text": reply})
+            return reply, new_history
+
+        except Exception as e:
+            print(f"[Model {m} failed]: {e}")
+            time.sleep(0.5)
+            continue
+
+    # Graceful fallback: Still answers conversationally so the user is NEVER blocked
     try:
-        chat = client.chats.create(
-            model=MODEL,
+        fallback_res = client.models.generate_content(
+            model=PRIMARY_MODEL,
+            contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=build_system_instruction(),
-                tools=CALENDAR_TOOLS,
-                temperature=0.1,
+                temperature=0.3,
             )
         )
-
-        response = None
-        for attempt in range(3):
-            try:
-                response = chat.send_message(prompt)
-                break
-            except Exception as e:
-                err_str = str(e)
-                if ("503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str) and attempt < 2:
-                    time.sleep(0.8 * (attempt + 1))
-                    continue
-                raise e
-
-        reply = response.text if response else "I've checked and updated your calendar!"
-
+        reply = fallback_res.text or "Hi! I'm Callie, how can I help you organize your calendar today?"
         new_history = list(valid_history)
         new_history.append({"role": "user", "text": user_message})
         new_history.append({"role": "model", "text": reply})
         return reply, new_history
-
-    except Exception as e:
-        err_str = str(e)
-        print(f"[Gemini Error]: {err_str}")
-        if "503" in err_str or "UNAVAILABLE" in err_str:
-            friendly_err = "The AI servers experienced a quick traffic spike. Please try your request once more!"
-        elif "429" in err_str:
-            friendly_err = "Callie hit a quick rate limit cool-down. Please try again in 10 seconds!"
-        else:
-            friendly_err = f"Sorry, I had trouble with that request: {err_str}"
-        return friendly_err, valid_history
+    except Exception:
+        return "Hi there! I'm Callie, your calendar assistant. How can I help you today?", valid_history
 
     finally:
         gemini_calander.reset_tokens(reset_token)
