@@ -1,6 +1,7 @@
 """
 Google Calendar Service module for Render / Python Flask backend.
-Implements robust event operations: add, list, move (reschedule), and remove (delete).
+Implements robust event operations: add, list, move (reschedule), remove (delete),
+and real calendar free-time / availability analysis.
 """
 import os
 import re
@@ -109,7 +110,6 @@ def match_event_by_title(events: list, query_title: str, time_hint: str = None):
                     return e
 
     # Step 5: Token / Word Containment Match
-    # If the user says "spanish", and an event is "Study Spanish", "Spanish Class", etc.
     stop_words = {
         'my', 'the', 'a', 'an', 'at', 'in', 'on', 'for', 'with', 'session',
         'class', 'meeting', 'event', 'lecture', 'appointment', 'to', 'from',
@@ -118,14 +118,12 @@ def match_event_by_title(events: list, query_title: str, time_hint: str = None):
     }
     q_words = [w for w in q_clean.split() if len(w) > 1 and w not in stop_words] if q_clean else []
 
-    # Check for direct word containment with time match
     if q_words and time_target:
         for e in events:
             s_words = [w for w in clean_string(e.get('summary', '')).split() if w not in stop_words]
             if any(qw in s_words for qw in q_words) and matches_time(e):
                 return e
 
-    # Check for direct word containment without time match
     if q_words:
         for e in events:
             s_words = [w for w in clean_string(e.get('summary', '')).split() if w not in stop_words]
@@ -167,7 +165,6 @@ def find_event_on_calendar(query_title: str, time_hint: str = None, date_hint: s
     now_ny = datetime.datetime.now(tz)
     today_midnight = datetime.datetime(now_ny.year, now_ny.month, now_ny.day, 0, 0, 0, tzinfo=tz)
 
-    # If the user specifically said "yesterday", "tomorrow", or specified a date
     target_start = None
     target_end = None
     if date_hint:
@@ -339,6 +336,183 @@ def get_day_summary(date_str: str = "today") -> str:
 
         lines.append(f"{time_str} | {summary}{loc_str}")
 
+    return "\n\n".join(lines) if lines else "You have nothing scheduled! Your calendar is completely open."
+
+def get_week_summary(days_ahead: int = 7) -> str:
+    """
+    Fetches real Google Calendar events for the next N days and groups them by date.
+    Shows empty days as 'Completely open'.
+    """
+    service = get_service()
+    tz = ZoneInfo("America/New_York")
+    now_ny = datetime.datetime.now(tz)
+    start_dt = datetime.datetime(now_ny.year, now_ny.month, now_ny.day, 0, 0, 0, tzinfo=tz)
+    end_dt = start_dt + datetime.timedelta(days=days_ahead)
+
+    try:
+        res = service.events().list(
+            calendarId='primary',
+            timeMin=start_dt.isoformat(),
+            timeMax=end_dt.isoformat(),
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        items = res.get('items', [])
+    except Exception as e:
+        print(f"[get_week_summary error]: {e}")
+        return "Unable to load week schedule from Google Calendar."
+
+    days_dict = {}
+    for d in range(days_ahead):
+        curr_day = (start_dt + datetime.timedelta(days=d)).date()
+        days_dict[curr_day] = []
+
+    for item in items:
+        summary = item.get('summary', 'Untitled')
+        if summary.lower().strip() in {
+            "retrieve user schedule", "check schedule", "get schedule",
+            "user schedule", "my schedule", "check calendar", "view schedule",
+            "schedule", "agenda", "calendar", "today's schedule", "daily schedule", "see schedule"
+        }:
+            continue
+
+        st = item.get('start', {}).get('dateTime')
+        et = item.get('end', {}).get('dateTime')
+        st_date = item.get('start', {}).get('date')
+        loc = item.get('location')
+        loc_str = f" ({loc})" if loc else ""
+
+        if st and et:
+            try:
+                st_dt = datetime.datetime.fromisoformat(st)
+                et_dt = datetime.datetime.fromisoformat(et)
+                time_str = f"{st_dt.strftime('%I:%M %p')} – {et_dt.strftime('%I:%M %p')}"
+                d_key = st_dt.date()
+                if d_key in days_dict:
+                    days_dict[d_key].append(f"{time_str} | {summary}{loc_str}")
+            except Exception:
+                pass
+        elif st_date:
+            try:
+                d_key = datetime.date.fromisoformat(st_date)
+                if d_key in days_dict:
+                    days_dict[d_key].append(f"All Day | {summary}{loc_str}")
+            except Exception:
+                pass
+
+    sections = []
+    for day_date, ev_list in days_dict.items():
+        day_header = day_date.strftime("%A, %B %d, %Y")
+        if ev_list:
+            ev_body = "\n\n".join(ev_list)
+            sections.append(f"**{day_header}**:\n\n{ev_body}")
+        else:
+            sections.append(f"**{day_header}**:\n\nNo scheduled events (Completely open!)")
+
+    return "\n\n".join(sections)
+
+def find_free_time(target_date: str = "today", duration_minutes: int = 30) -> str:
+    """
+    Analyzes the user's actual Google Calendar events and computes real open windows.
+    """
+    service = get_service()
+    tz = ZoneInfo("America/New_York")
+    now_ny = datetime.datetime.now(tz)
+
+    if target_date == "today":
+        d = now_ny.date()
+    elif target_date == "tomorrow":
+        d = now_ny.date() + datetime.timedelta(days=1)
+    elif "week" in target_date:
+        return get_week_summary(7)
+    else:
+        try:
+            d = datetime.date.fromisoformat(target_date)
+        except Exception:
+            d = now_ny.date()
+
+    start_dt = datetime.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tz)
+    end_dt = start_dt + datetime.timedelta(days=1)
+
+    try:
+        res = service.events().list(
+            calendarId='primary',
+            timeMin=start_dt.isoformat(),
+            timeMax=end_dt.isoformat(),
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        items = res.get('items', [])
+    except Exception as e:
+        print(f"[find_free_time error]: {e}")
+        return "Unable to check calendar free slots."
+
+    timed_events = []
+    for item in items:
+        summary = item.get('summary', 'Untitled')
+        if summary.lower().strip() in {
+            "retrieve user schedule", "check schedule", "get schedule",
+            "user schedule", "my schedule", "check calendar", "view schedule",
+            "schedule", "agenda", "calendar"
+        }:
+            continue
+        st = item.get('start', {}).get('dateTime')
+        et = item.get('end', {}).get('dateTime')
+        if st and et:
+            try:
+                st_dt = datetime.datetime.fromisoformat(st)
+                et_dt = datetime.datetime.fromisoformat(et)
+                timed_events.append((st_dt, et_dt, summary))
+            except Exception:
+                pass
+
+    if not timed_events:
+        day_label = "today" if target_date == "today" else f"on {d.strftime('%A, %b %d')}"
+        return f"Your calendar is completely open {day_label}! You have no scheduled commitments."
+
+    timed_events.sort(key=lambda x: x[0])
+    day_end = datetime.datetime(d.year, d.month, d.day, 22, 0, 0, tzinfo=tz)
+
+    open_slots = []
+    # Check gap before first event if in the future
+    day_start = datetime.datetime(d.year, d.month, d.day, 9, 0, 0, tzinfo=tz)
+    first_ev_start = timed_events[0][0]
+    if d > now_ny.date() or now_ny < first_ev_start:
+        earliest_check = max(day_start, now_ny) if d == now_ny.date() else day_start
+        if (first_ev_start - earliest_check).total_seconds() >= duration_minutes * 60:
+            open_slots.append((earliest_check, first_ev_start, "Morning Opening"))
+
+    # Check gaps between events
+    for i in range(len(timed_events) - 1):
+        ev_end = timed_events[i][1]
+        next_start = timed_events[i + 1][0]
+        if next_start > ev_end:
+            gap_sec = (next_start - ev_end).total_seconds()
+            if gap_sec >= duration_minutes * 60:
+                slot_start = max(ev_end, now_ny) if d == now_ny.date() else ev_end
+                if (next_start - slot_start).total_seconds() >= duration_minutes * 60:
+                    mins = int(gap_sec // 60)
+                    hrs = mins // 60
+                    rem_m = mins % 60
+                    dur_str = f"{hrs}h {rem_m}m open" if hrs else f"{mins} min open"
+                    open_slots.append((slot_start, next_start, f"Free Window ({dur_str})"))
+
+    # Gap after last event until 10:00 PM
+    last_ev_end = timed_events[-1][1]
+    if last_ev_end < day_end:
+        slot_start = max(last_ev_end, now_ny) if d == now_ny.date() else last_ev_end
+        if slot_start < day_end and (day_end - slot_start).total_seconds() >= duration_minutes * 60:
+            open_slots.append((slot_start, day_end, "Open Evening (wrap-up & relax)"))
+
+    if not open_slots:
+        return "You have a full schedule with no major open gaps over 30 minutes."
+
+    lines = []
+    for s_time, e_time, desc in open_slots:
+        st_f = s_time.strftime('%I:%M %p')
+        et_f = e_time.strftime('%I:%M %p')
+        lines.append(f"{st_f} – {et_f} | {desc}")
+
     return "\n\n".join(lines)
 
 def create_calendar_event(summary: str, start_time: str, end_time: str, description="Created by Callie"):
@@ -431,7 +605,6 @@ def move_event(event_title: str, new_start_time: str, new_end_time: str = None, 
             stray_id = stray.get('id')
             if stray_id and stray_id != event_id:
                 stray_clean = clean_string(stray.get('summary', ''))
-                # If stray event is an exact shorthand or same name
                 if stray_clean in [sum_clean, q_clean] or (len(stray_clean) >= 3 and stray_clean in sum_clean):
                     try:
                         service.events().delete(calendarId='primary', eventId=stray_id).execute()
@@ -453,16 +626,7 @@ def move_event(event_title: str, new_start_time: str, new_end_time: str = None, 
     time_display = start_dt.strftime('%I:%M %p')
     return f"Done! I've moved \"{summary}\" to {time_display}! 🗓️"
 
-def find_free_time(duration_minutes=30, target_date="today", prefer_time_of_day="any"):
-    return (
-        "10:30 AM – 12:00 PM (1.5 hours open)\n\n"
-        "02:00 PM – 03:30 PM (1.5 hours open)\n\n"
-        "05:00 PM – 06:30 PM (1.5 hours open)"
-    )
-
 def chat_with_callie(user_message: str, tokens: dict = None, history: list = None):
     from ai_assistant import process_prompt
     return process_prompt(user_message, tokens, history)
-
-
 

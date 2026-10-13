@@ -10,8 +10,6 @@ import gemini_calander
 load_dotenv()
 
 # Zero-cost production models on Google GenAI:
-# gemini-3.8-flash is the modern standard model for text tasks & reasoning.
-# gemini-3.1-flash-lite is the ultra-fast lightweight model.
 PRIMARY_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 CANDIDATE_MODELS = [
     PRIMARY_MODEL,
@@ -54,6 +52,7 @@ CRITICAL INTENT RULES (READ vs WRITE):
 - The word "schedule" is very often a NOUN: "what's my schedule", "whats on the schedule", "my schedule today", "agenda", "what am i doing today". These are READ operations. NEVER create an event when someone asks about their schedule.
 - ONLY create an event when the user explicitly commands you to ADD or BOOK a specific new activity (e.g. "Add CS lecture at 2pm", "Schedule gym tomorrow at 6pm").
 - NEVER invent placeholder event names like "Retrieve user schedule", "Check calendar", or "Schedule".
+- NEVER fabricate, hallucinate, or assume fake college classes, sports, or appointments (e.g. do NOT invent Psychology, Calculus, Soccer Practice, Chemistry). Always rely on the user's real Google Calendar.
 
 FORMATTING RULES FOR SCHEDULES (SPACED VERTICAL COLUMN, NO RAW ASTERISKS):
 - NEVER output a dense block or clump of text.
@@ -100,7 +99,7 @@ def is_asking_for_schedule(msg_lower: str) -> bool:
         "tell me", "calendar", "again", "today", "tomorrow"
     ]
     if "schedule" in msg_lower:
-        if any(p in msg_lower for p in ["my schedule", "the schedule", "a schedule", "our schedule", "today's schedule"]):
+        if any(p in msg_lower for p in ["my schedule", "the schedule", "a schedule", "our schedule", "today's schedule", "for the week"]):
             return True
         if any(ind in msg_lower for ind in ["what", "whats", "what's", "check", "show", "see", "view", "again"]):
             return True
@@ -108,8 +107,25 @@ def is_asking_for_schedule(msg_lower: str) -> bool:
     return any(p in msg_lower for p in [
         "whats on", "what's on", "whats my", "what's my", "what do i have",
         "what am i doing", "what am i up to", "my agenda", "upcoming events",
-        "any plans", "check calendar", "view calendar", "today's plan"
+        "any plans", "check calendar", "view calendar", "today's plan",
+        "for the week", "schedule for the week"
     ])
+
+def is_asking_for_availability_or_free_time(msg_lower: str) -> bool:
+    """
+    Detects if user is asking about free time, open slots, availability,
+    or finding good times to hang out, see friends, or plan activities.
+    """
+    avail_keywords = [
+        "free time", "free slot", "open slot", "open time", "downtime",
+        "when am i free", "when do i have time", "when would be a good time",
+        "good time to", "best time to", "time to see", "time to meet",
+        "time to hang", "time for lunch", "time for dinner", "can i squeeze",
+        "have time to", "have time for", "any time open", "open windows",
+        "availability", "available this", "available today", "available tomorrow",
+        "when can i", "see my friends", "hang out", "downtime"
+    ]
+    return any(k in msg_lower for k in avail_keywords)
 
 def is_asking_to_create_event(msg_lower: str) -> bool:
     """Strictly detect if user wants to ADD a new event (write operation)."""
@@ -177,7 +193,6 @@ def extract_agenda_from_history(history: list[dict] | None) -> list[dict]:
         return events
     for turn in reversed(history):
         text = turn.get("text", "")
-        # Matches lines like: 06:00 PM – 07:00 PM | Study Spanish (Room 101)
         matches = re.findall(r'(\d{1,2}:\d{2}\s*[AP]M)\s*[–-]\s*\d{1,2}:\d{2}\s*[AP]M\s*\|\s*([^(\n\r]+)', text)
         if matches:
             for time_str, title_str in matches:
@@ -227,7 +242,6 @@ def resolve_event_from_context(user_query: str, history: list[dict] | None) -> t
     # 2. Match against events displayed in recent schedule
     agenda = extract_agenda_from_history(history)
     if agenda and q_clean:
-        # Check exact word containment (e.g. 'spanish' in 'Study Spanish')
         for item in agenda:
             ev_clean = gemini_calander.clean_string(item['title'])
             if q_clean == ev_clean:
@@ -236,7 +250,6 @@ def resolve_event_from_context(user_query: str, history: list[dict] | None) -> t
         for item in agenda:
             ev_clean = gemini_calander.clean_string(item['title'])
             ev_words = ev_clean.split()
-            # If the user's query word matches any word in the event title (e.g. 'spanish' in ['study', 'spanish'])
             if q_clean in ev_words or any(q_clean in w for w in ev_words if len(q_clean) >= 3):
                 return (item['title'], item['time'])
 
@@ -266,21 +279,18 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
                 break
 
     # Follow-up detection for multi-turn prompts:
-    # 1. User answers a time question like "9pm"
     is_answering_move_time = (
         ("new date and time" in last_model_turn.lower() or "what new time" in last_model_turn.lower() or "reschedule" in last_model_turn.lower())
         and bool(re.search(r'\b(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|tomorrow|today|yesterday|at\s+\d{1,2})\b', msg_lower))
         and len(msg_lower.split()) <= 6
     )
 
-    # 2. User answers a delete event question like "spanish"
     is_answering_delete_title = (
         ("remove from your calendar" in last_model_turn.lower() or "like me to remove" in last_model_turn.lower())
         and len(msg_lower.split()) <= 5
         and not any(w in msg_lower for w in ["hi", "hello", "hey", "what", "how"])
     )
 
-    # Check if user asked to also view their schedule after the action
     show_schedule_too = bool(re.search(r'\b(and\s+(?:tell|show|view|check|give)\s+(?:me\s+)?(?:my\s+)?schedule|schedule\s+again)\b', msg_lower))
 
     try:
@@ -314,7 +324,6 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
         # =========================================================================
         # 2. FAST-PATH: DIRECT MOVE / RESCHEDULE COMMANDS (Instant Execution)
         # =========================================================================
-        # Matches commands like: "move spanish to 8pm", "reschedule study spanish to 9pm", "move it to 9pm"
         move_regex = re.search(
             r'^\s*(?:please\s+)?(?:move|reschedule|shift|postpone|change\s+the\s+time\s+of)\s+(.+?)\s+(?:to|at)\s+(.+?)(?:\s+and\s+.*)?$',
             msg_lower,
@@ -335,7 +344,6 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
                 new_hist.append({"role": "model", "text": reply})
                 return reply, new_hist
 
-        # Check for move intent without target time: "move spanish", "reschedule study session"
         move_notime_regex = re.search(
             r'^\s*(?:please\s+)?(?:move|reschedule|shift)\s+([a-zA-Z0-9\s]+?)\s*$',
             msg_lower,
@@ -353,7 +361,6 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
         # =========================================================================
         # 3. FAST-PATH: DIRECT REMOVE / DELETE COMMANDS (Instant Execution)
         # =========================================================================
-        # Matches: "delete spanish", "remove study spanish", "cancel gym", "remove it"
         delete_regex = re.search(
             r'^\s*(?:please\s+)?(?:remove|delete|cancel|drop|take\s+off|erase)\s+(.+?)(?:\s+and\s+.*)?$',
             msg_lower,
@@ -361,7 +368,9 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
         )
         if delete_regex and not any(w in msg_lower for w in ["to ", "at "]):
             raw_target = delete_regex.group(1).strip()
-            resolved_title, orig_time = resolve_event_from_context(raw_target, history)
+            # If user says e.g. "the other spanish", clean to "spanish"
+            clean_del_target = re.sub(r'\b(the\s+other|that|other)\b', '', raw_target).strip() or raw_target
+            resolved_title, orig_time = resolve_event_from_context(clean_del_target, history)
             reply = gemini_calander.remove_event(resolved_title, time_hint=orig_time)
             if show_schedule_too:
                 today_summary = gemini_calander.get_day_summary("today")
@@ -372,21 +381,72 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
             return reply, new_hist
 
         # =========================================================================
-        # 4. SCHEDULE INSPECTION INTENT (Read query)
+        # 4. AVAILABILITY & FREE TIME INTENT (Real Google Calendar Grounding)
         # =========================================================================
         has_move_verbs = bool(re.search(r'\b(move|reschedule|postpone|shift|push back|change the time)\b', msg_lower))
         has_delete_verbs = bool(re.search(r'\b(remove|delete|cancel|drop|erase)\b', msg_lower))
+
+        if is_asking_for_availability_or_free_time(msg_lower) and not has_move_verbs and not has_delete_verbs:
+            if any(w in msg_lower for w in ["week", "this week", "weekend", "days", "friends"]):
+                calendar_data = gemini_calander.get_week_summary(7)
+                prompt = f"""{build_system_instruction()}
+User asked: "{user_message}".
+
+HERE IS THEIR ACTUAL LIVE GOOGLE CALENDAR SCHEDULE FOR THE WEEK:
+{calendar_data}
+
+CRITICAL RULES:
+- You MUST ground your entire response in their REAL calendar data above.
+- NEVER invent, assume, or hallucinate any events (no fake classes, no soccer practice, etc.).
+- Clearly point out the real open afternoons, evenings, or days where they have zero commitments.
+- Make thoughtful, energetic recommendations on the best times to hang out or take breaks!"""
+                reply = safe_generate_content(client, prompt, fallback_text=f"Here is your week's schedule to help you plan:\n\n{calendar_data}")
+            elif "tomorrow" in msg_lower:
+                events = gemini_calander.get_day_summary("tomorrow")
+                free_slots = gemini_calander.find_free_time("tomorrow")
+                prompt = f"""{build_system_instruction()}
+User asked: "{user_message}".
+Their real Google Calendar commitments for tomorrow:
+{events}
+
+Real calculated open gaps for tomorrow:
+{free_slots}
+
+Respond cheerfully in character as Callie, pointing out their open windows based ONLY on this real data:"""
+                reply = safe_generate_content(client, prompt, fallback_text=f"Here are your open windows tomorrow:\n\n{free_slots}")
+            else:
+                events = gemini_calander.get_day_summary("today")
+                free_slots = gemini_calander.find_free_time("today")
+                prompt = f"""{build_system_instruction()}
+User asked: "{user_message}".
+Their real Google Calendar commitments for today:
+{events}
+
+Real calculated open gaps for today:
+{free_slots}
+
+Respond cheerfully in character as Callie, pointing out their open windows based ONLY on this real data:"""
+                reply = safe_generate_content(client, prompt, fallback_text=f"Here are your open slots for today:\n\n{free_slots}")
+
+            new_hist = list(history or [])
+            new_hist.append({"role": "user", "text": user_message})
+            new_hist.append({"role": "model", "text": reply})
+            return reply, new_hist
+
+        # =========================================================================
+        # 5. SCHEDULE INSPECTION INTENT (Read query)
+        # =========================================================================
         is_schedule_query = is_asking_for_schedule(msg_lower) and not has_move_verbs and not has_delete_verbs
 
         if is_schedule_query:
-            if "tomorrow" in msg_lower:
+            if any(w in msg_lower for w in ["week", "this week", "next week"]):
+                events = gemini_calander.get_week_summary(7)
+            elif "tomorrow" in msg_lower:
                 tomorrow_date = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
                 events = gemini_calander.get_day_summary(tomorrow_date)
             elif "yesterday" in msg_lower:
                 yesterday_date = (now - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
                 events = gemini_calander.get_day_summary(yesterday_date)
-            elif "week" in msg_lower:
-                events = gemini_calander.list_upcoming_events(10)
             else:
                 events = gemini_calander.get_day_summary("today")
                 if "nothing scheduled" in events.lower():
@@ -407,7 +467,7 @@ Respond in character as Callie. Lay out their schedule in a clean vertical colum
             return reply, new_hist
 
         # =========================================================================
-        # 5. GENERAL / COMPLEX MOVE INTENT (Gemini Fallback)
+        # 6. GENERAL / COMPLEX MOVE INTENT (Gemini Fallback)
         # =========================================================================
         if has_move_verbs:
             agenda = extract_agenda_from_history(history)
@@ -460,7 +520,7 @@ Output ONLY a raw JSON object:
             return reply, new_hist
 
         # =========================================================================
-        # 6. GENERAL / COMPLEX DELETE INTENT (Gemini Fallback)
+        # 7. GENERAL / COMPLEX DELETE INTENT (Gemini Fallback)
         # =========================================================================
         if has_delete_verbs:
             title, orig_time = resolve_event_from_context(user_message, history)
@@ -474,7 +534,7 @@ Output ONLY a raw JSON object:
             return reply, new_hist
 
         # =========================================================================
-        # 7. ADD / SCHEDULE EVENT INTENT (Write query)
+        # 8. ADD / SCHEDULE EVENT INTENT (Write query)
         # =========================================================================
         if is_asking_to_create_event(msg_lower):
             extract_prompt = f"""Extract the event details from this user request.
@@ -518,21 +578,27 @@ Output ONLY a raw JSON object:
             return reply, new_hist
 
         # =========================================================================
-        # 8. GENERAL CONVERSATION & GREETINGS ("hi", "how are you", chat)
+        # 9. GENERAL CONVERSATION & GREETINGS ("hi", "how are you", chat)
         # =========================================================================
         context = ""
         if history:
             recent = [f"{t['role'].capitalize()}: {t['text']}" for t in history[-4:] if "error" not in t.get("text", "").lower()]
             context = "Recent conversation:\n" + "\n".join(recent) + "\n\n"
 
-        prompt = f"{build_system_instruction()}\n\n{context}User: {user_message}\nCallie:"
+        prompt = f"""{build_system_instruction()}
+{context}User: {user_message}
+
+SYSTEM NOTE ON ACCURACY:
+If the user asks about previous hallucinated or fake classes (e.g., Intro to Psychology, Soccer Practice, Chemistry), be playful and candid: admit that you had a momentary daydream and made those placeholder classes up, reassure them that only their actual real calendar (Multivariable Calculus, TA Work, Computer Organization, etc.) counts, and confirm that all future suggestions are 100% grounded in their real calendar.
+
+Callie:"""
         fallback = "Hi there! I'm Callie, your calendar assistant. How can I help you organize your day?"
         reply = safe_generate_content(client, prompt, fallback_text=fallback)
 
         new_history = list(history or [])
         new_history.append({"role": "user", "text": user_message})
         new_history.append({"role": "model", "text": reply})
-        return reply, new_history
+        return reply, new_hist if 'new_hist' in locals() else new_history
 
     except Exception as e:
         print(f"[Callie Error]: {e}")
