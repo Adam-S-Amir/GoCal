@@ -1,0 +1,14 @@
+{
+  "dependencies": {
+    "@google/genai": "^2.29.1",
+    "googleapis": "^185.0.0",
+    "lucide-react": "^1.56.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5"
+  },
+  "allowScripts": {
+    "@google/genai@2.29.1": true,
+    "protobufjs@7.6.6": true
+  }
+}
