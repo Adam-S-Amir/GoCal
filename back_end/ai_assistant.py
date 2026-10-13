@@ -10,7 +10,8 @@ import gemini_calander
 
 load_dotenv()
 
-MODEL = "gemini-3.1-flash-lite"
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+FALLBACK_MODEL = "gemini-flash-latest"
 
 FORBIDDEN_SUMMARIES = {
     "retrieve user schedule",
@@ -58,19 +59,20 @@ FORMATTING RULES FOR SCHEDULES (SPACED VERTICAL COLUMN, NO RAW ASTERISKS):
 """
 
 def safe_generate_content(client, prompt: str, fallback_text: str = "") -> str:
-    """Retries up to 3 times on temporary 503/429 spikes, and falls back to real calendar data if needed."""
-    for attempt in range(3):
-        try:
-            res = client.models.generate_content(model=MODEL, contents=prompt)
-            if res and res.text:
-                return res.text.strip()
-        except Exception as e:
-            err_str = str(e)
-            if ("503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str) and attempt < 2:
-                time.sleep(1.0 * (attempt + 1))
-                continue
-            print(f"[Gemini 503 Spike on attempt {attempt+1}]: {err_str}")
-            break
+    """Tries primary MODEL (gemini-3.8-flash), falling back to FALLBACK_MODEL on rate limits or errors."""
+    for model_name in [MODEL, FALLBACK_MODEL]:
+        for attempt in range(2):
+            try:
+                res = client.models.generate_content(model=model_name, contents=prompt)
+                if res and res.text:
+                    return res.text.strip()
+            except Exception as e:
+                err_str = str(e)
+                if ("503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str) and attempt < 1:
+                    time.sleep(1.0)
+                    continue
+                print(f"[{model_name} attempt {attempt+1} error]: {err_str}")
+                break
     return fallback_text
 
 def is_asking_for_schedule(msg_lower: str) -> bool:
