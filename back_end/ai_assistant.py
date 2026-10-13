@@ -169,18 +169,25 @@ Respond in character as Callie. Lay out their schedule in a clean vertical colum
 
         # 3. MOVE / RESCHEDULE EVENT INTENT
         elif is_move_intent:
+            conv_context = ""
+            if history:
+                recent_turns = [f"{t.get('role', 'user').capitalize()}: {t.get('text', '')}" for t in history[-4:] if t.get('text')]
+                if recent_turns:
+                    conv_context = "Recent conversation context:\n" + "\n".join(recent_turns) + "\n\n"
+
             extract_prompt = f"""Extract details to reschedule an existing Google Calendar event.
 Current time: {now.strftime("%A, %B %d, %Y %I:%M %p")} America/New_York.
-User request: "{user_message}"
+{conv_context}Current user request: "{user_message}"
 
 Instructions:
-- "title": Core title/name of the event to reschedule (e.g. "Lunch", "Gym", "CS 3110"). If the user only gave a time (e.g., "move my 2pm to 4pm"), set title to "".
-- "original_time": The current/original time of the event if mentioned (e.g., "2:00 PM", "2pm", "10:30 AM", or null).
+- If the user uses pronouns or references previous events (e.g. "it", "that", "that meeting", "move it to 10pm"), use the Recent conversation context above to identify the event name or previous time being referred to!
+- "title": Core topic/title of the event to reschedule (e.g. "Spanish", "Study Spanish", "Gym", "Lunch"). If user says "move spanish" and an event might be "Study Spanish", return "Spanish".
+- "original_time": The current/original time of the event before being moved if mentioned or known from context (e.g., "9:00 PM", "9pm", "2pm", or null).
 - "original_date": The date of the original event if mentioned (e.g., "yesterday", "tomorrow", "today", "2026-10-12", or null).
-- "new_start_time": ISO-8601 string in Eastern Time with timezone offset for the new target start time (e.g. "2026-10-13T16:00:00-04:00").
+- "new_start_time": ISO-8601 string in Eastern Time with timezone offset for the new target start time (e.g. "2026-10-13T22:00:00-04:00").
 
 Output ONLY a raw JSON object:
-{{"title": "Event Name", "original_time": "2:00 PM", "original_date": "yesterday or null", "new_start_time": "YYYY-MM-DDTHH:MM:SS-04:00"}}"""
+{{"title": "Event Name", "original_time": "9:00 PM", "original_date": "yesterday or null", "new_start_time": "YYYY-MM-DDTHH:MM:SS-04:00"}}"""
             raw_text = safe_generate_content(client, extract_prompt, fallback_text="")
             if "```" in raw_text:
                 raw_text = re.sub(r"```(json)?", "", raw_text).replace("```", "").strip()
@@ -188,6 +195,9 @@ Output ONLY a raw JSON object:
                 json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
                 data = json.loads(json_match.group(0)) if json_match else json.loads(raw_text)
                 title = data.get("title", "").strip()
+                # Clean generic references like "it" or "that"
+                if title.lower() in ["it", "that", "the event", "that event", "this"]:
+                    title = ""
                 orig_time = data.get("original_time")
                 orig_date = data.get("original_date")
                 new_start = data.get("new_start_time", "").strip()
@@ -201,8 +211,17 @@ Output ONLY a raw JSON object:
 
         # 4. REMOVE / CANCEL EVENT INTENT
         elif is_delete_intent:
-            extract_prompt = f"""Extract the event title, time, or date to remove from: "{user_message}".
+            conv_context = ""
+            if history:
+                recent_turns = [f"{t.get('role', 'user').capitalize()}: {t.get('text', '')}" for t in history[-4:] if t.get('text')]
+                if recent_turns:
+                    conv_context = "Recent conversation context:\n" + "\n".join(recent_turns) + "\n\n"
+
+            extract_prompt = f"""Extract the event title, time, or date to remove.
 Current time: {now.strftime("%A, %B %d, %Y %I:%M %p")} America/New_York.
+{conv_context}Current user request: "{user_message}"
+
+If the user refers to "it", "that", or previous context (e.g. "delete it", "cancel that"), resolve the event title and time from the Recent conversation context above.
 Output ONLY raw JSON: {{"title": "Title to remove", "time_hint": "2:00 PM or null", "date_hint": "yesterday, tomorrow, or null"}}"""
             raw_text = safe_generate_content(client, extract_prompt, fallback_text="")
             if "```" in raw_text:
@@ -211,6 +230,8 @@ Output ONLY raw JSON: {{"title": "Title to remove", "time_hint": "2:00 PM or nul
                 json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
                 data = json.loads(json_match.group(0)) if json_match else json.loads(raw_text)
                 title = data.get("title", "").strip()
+                if title.lower() in ["it", "that", "the event", "that event", "this"]:
+                    title = ""
                 time_hint = data.get("time_hint")
                 date_hint = data.get("date_hint")
                 if not title and not time_hint:
@@ -222,9 +243,15 @@ Output ONLY raw JSON: {{"title": "Title to remove", "time_hint": "2:00 PM or nul
 
         # 5. ADD / SCHEDULE EVENT INTENT (Write query)
         elif is_create_intent:
+            conv_context = ""
+            if history:
+                recent_turns = [f"{t.get('role', 'user').capitalize()}: {t.get('text', '')}" for t in history[-4:] if t.get('text')]
+                if recent_turns:
+                    conv_context = "Recent conversation context:\n" + "\n".join(recent_turns) + "\n\n"
+
             extract_prompt = f"""Extract the event details from this user request.
 Current time: {now.strftime("%A, %B %d, %Y %I:%M %p")} EDT.
-User request: "{user_message}"
+{conv_context}User request: "{user_message}"
 Output ONLY a raw JSON object with no markdown:
 {{"summary": "Event Title", "start_time": "YYYY-MM-DDTHH:MM:SS-04:00", "end_time": "YYYY-MM-DDTHH:MM:SS-04:00"}}"""
             raw_text = safe_generate_content(client, extract_prompt, fallback_text="")

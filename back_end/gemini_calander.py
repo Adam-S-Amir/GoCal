@@ -106,22 +106,47 @@ def match_event_by_title(events: list, query_title: str, time_hint: str = None):
                 if s_clean in q_clean or q_clean in s_clean:
                     return e
 
-    # Step 5: Word scoring match
+    # Step 5: Token / Word Containment Match
+    # If the user says "spanish", and an event is "Study Spanish", "Spanish Class", etc.
+    # Any query word matching any event word (or contained within) gets strong priority!
     stop_words = {
         'my', 'the', 'a', 'an', 'at', 'in', 'on', 'for', 'with', 'session',
         'class', 'meeting', 'event', 'lecture', 'appointment', 'to', 'from',
-        'please', 'can', 'you', 'callie', 'schedule'
+        'please', 'can', 'you', 'callie', 'schedule', 'move', 'reschedule',
+        'it', 'that', 'this'
     }
     q_words = [w for w in q_clean.split() if len(w) > 1 and w not in stop_words] if q_clean else []
 
+    # Check for direct word containment (e.g. "spanish" in "study spanish")
+    for e in events:
+        s_words = [w for w in clean_string(e.get('summary', '')).split() if w not in stop_words]
+        # If any significant query word is in the event summary words
+        if q_words and any(qw in s_words for qw in q_words) and matches_time(e):
+            return e
+
+    for e in events:
+        s_words = [w for w in clean_string(e.get('summary', '')).split() if w not in stop_words]
+        if q_words and any(qw in s_words for qw in q_words):
+            return e
+
+    # Step 6: Word scoring match with partial stems (e.g. "study" matches "studying", "span" matches "spanish")
     best_match = None
     max_score = 0
     for e in events:
-        s_words = clean_string(e.get('summary', '')).split()
-        score = sum(2 for qw in q_words if any(sw == qw for sw in s_words))
-        score += sum(1 for qw in q_words if any((sw in qw or qw in sw) and sw != qw for sw in s_words))
+        s_clean = clean_string(e.get('summary', ''))
+        s_words = s_clean.split()
+        score = 0
+        for qw in q_words:
+            if qw in s_words:
+                score += 4
+            elif qw in s_clean:
+                score += 3
+            elif any(qw in sw or sw in qw for sw in s_words if len(sw) >= 3 and len(qw) >= 3):
+                score += 2
+
         if matches_time(e):
             score += 5
+
         if score > max_score:
             max_score = score
             best_match = e
@@ -397,4 +422,6 @@ def chat_with_callie(user_message: str, tokens: dict = None, history: list = Non
     from ai_assistant import process_prompt
     effective_tokens = tokens or _current_tokens
     return process_prompt(user_message, effective_tokens, history or [])
+
+
 
