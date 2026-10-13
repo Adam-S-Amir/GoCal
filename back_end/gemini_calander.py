@@ -31,7 +31,7 @@ def clean_string(s: str) -> str:
     return re.sub(r'[^a-z0-9\s]', ' ', s.lower()).strip()
 
 def extract_hour_minute_hint(time_hint: str):
-    """Tries to extract (hour_24, minute) from hints like '2pm', '2:30pm', '14:00', '10am'."""
+    """Tries to extract (hour_24, minute) from hints like '2pm', '2:30pm', '14:00', '10am', '6:00 PM'."""
     if not time_hint:
         return None
     th = str(time_hint).lower().strip()
@@ -82,22 +82,24 @@ def match_event_by_title(events: list, query_title: str, time_hint: str = None):
         return None
 
     # Step 1: Exact summary match + time match
-    if q_clean:
+    if q_clean and time_target:
         for e in events:
             if clean_string(e.get('summary', '')) == q_clean and matches_time(e):
                 return e
 
-        # Step 2: Exact summary match
-        for e in events:
-            if clean_string(e.get('summary', '')) == q_clean:
-                return e
-
-        # Step 3: Substring match + time match
+    # Step 2: Substring match + time match (e.g. user says 'spanish' + 6pm, event is 'Study Spanish' at 6pm)
+    if q_clean and time_target:
         for e in events:
             s_clean = clean_string(e.get('summary', ''))
             if len(s_clean) >= 3 and len(q_clean) >= 3:
                 if (s_clean in q_clean or q_clean in s_clean) and matches_time(e):
                     return e
+
+    # Step 3: Exact summary match
+    if q_clean:
+        for e in events:
+            if clean_string(e.get('summary', '')) == q_clean:
+                return e
 
         # Step 4: Substring match (minimum 3 chars to avoid false positives)
         for e in events:
@@ -108,7 +110,6 @@ def match_event_by_title(events: list, query_title: str, time_hint: str = None):
 
     # Step 5: Token / Word Containment Match
     # If the user says "spanish", and an event is "Study Spanish", "Spanish Class", etc.
-    # Any query word matching any event word (or contained within) gets strong priority!
     stop_words = {
         'my', 'the', 'a', 'an', 'at', 'in', 'on', 'for', 'with', 'session',
         'class', 'meeting', 'event', 'lecture', 'appointment', 'to', 'from',
@@ -117,19 +118,21 @@ def match_event_by_title(events: list, query_title: str, time_hint: str = None):
     }
     q_words = [w for w in q_clean.split() if len(w) > 1 and w not in stop_words] if q_clean else []
 
-    # Check for direct word containment (e.g. "spanish" in "study spanish")
-    for e in events:
-        s_words = [w for w in clean_string(e.get('summary', '')).split() if w not in stop_words]
-        # If any significant query word is in the event summary words
-        if q_words and any(qw in s_words for qw in q_words) and matches_time(e):
-            return e
+    # Check for direct word containment with time match
+    if q_words and time_target:
+        for e in events:
+            s_words = [w for w in clean_string(e.get('summary', '')).split() if w not in stop_words]
+            if any(qw in s_words for qw in q_words) and matches_time(e):
+                return e
 
-    for e in events:
-        s_words = [w for w in clean_string(e.get('summary', '')).split() if w not in stop_words]
-        if q_words and any(qw in s_words for qw in q_words):
-            return e
+    # Check for direct word containment without time match
+    if q_words:
+        for e in events:
+            s_words = [w for w in clean_string(e.get('summary', '')).split() if w not in stop_words]
+            if any(qw in s_words for qw in q_words):
+                return e
 
-    # Step 6: Word scoring match with partial stems (e.g. "study" matches "studying", "span" matches "spanish")
+    # Step 6: Word scoring match with partial stems
     best_match = None
     max_score = 0
     for e in events:
@@ -179,7 +182,6 @@ def find_event_on_calendar(query_title: str, time_hint: str = None, date_hint: s
             target_start = tom_midnight.isoformat()
             target_end = next_midnight.isoformat()
         else:
-            # Try parsing ISO date or YYYY-MM-DD
             m = re.search(r'(\d{4}-\d{2}-\d{2})', dh)
             if m:
                 try:
@@ -238,7 +240,6 @@ def find_event_on_calendar(query_title: str, time_hint: str = None, date_hint: s
             orderBy='startTime'
         ).execute()
         items = res.get('items', [])
-        # Reverse so yesterday is evaluated before 2 weeks ago
         items.reverse()
         match = match_event_by_title(items, query_title, time_hint=time_hint)
         if match:
@@ -273,37 +274,44 @@ def list_upcoming_events(max_results=10):
             continue
         start = item.get('start', {}).get('dateTime') or item.get('start', {}).get('date', '')
         lines.append(f"- {summary}: {start}")
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else "No upcoming events found on your calendar."
 
-def get_day_summary(target_date="today"):
+def get_day_summary(date_str: str = "today") -> str:
+    """
+    Fetches events for a single day and returns a clean, spaced vertical schedule.
+    Filters out placeholder / query-shaped events like 'Retrieve user schedule'.
+    """
     service = get_service()
     tz = ZoneInfo("America/New_York")
-    now = datetime.datetime.now(tz)
+    now_ny = datetime.datetime.now(tz)
 
-    if target_date == "today":
-        d = now.date()
-    elif target_date == "tomorrow":
-        d = now.date() + datetime.timedelta(days=1)
+    if date_str == "today":
+        target_date = now_ny.date()
+    elif date_str == "yesterday":
+        target_date = now_ny.date() - datetime.timedelta(days=1)
+    elif date_str == "tomorrow":
+        target_date = now_ny.date() + datetime.timedelta(days=1)
     else:
         try:
-            d = datetime.date.fromisoformat(target_date)
+            target_date = datetime.date.fromisoformat(date_str)
         except Exception:
-            d = now.date()
+            target_date = now_ny.date()
 
-    day_start = datetime.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tz).isoformat()
-    day_end = datetime.datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=tz).isoformat()
+    start_of_day = datetime.datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=tz)
+    end_of_day = start_of_day + datetime.timedelta(days=1)
 
-    res = service.events().list(
+    events_result = service.events().list(
         calendarId='primary',
-        timeMin=day_start,
-        timeMax=day_end,
+        timeMin=start_of_day.isoformat(),
+        timeMax=end_of_day.isoformat(),
         singleEvents=True,
         orderBy='startTime'
     ).execute()
 
-    items = res.get('items', [])
+    items = events_result.get('items', [])
     if not items:
-        return f"Nothing scheduled on {d.strftime('%A, %B %d')}."
+        day_label = "today" if date_str == "today" else f"on {target_date.strftime('%A, %b %d')}"
+        return f"You have nothing scheduled {day_label}! Your calendar is completely open."
 
     lines = []
     for item in items:
@@ -311,9 +319,10 @@ def get_day_summary(target_date="today"):
         if summary.lower().strip() in {
             "retrieve user schedule", "check schedule", "get schedule",
             "user schedule", "my schedule", "check calendar", "view schedule",
-            "schedule", "agenda", "calendar"
+            "schedule", "agenda", "calendar", "today's schedule", "daily schedule", "see schedule"
         }:
             continue
+
         st = item.get('start', {}).get('dateTime')
         et = item.get('end', {}).get('dateTime')
         loc = item.get('location')
@@ -367,6 +376,7 @@ def move_event(event_title: str, new_start_time: str, new_end_time: str = None, 
     Moves/reschedules an event by deleting the old event and adding it at the new time.
     Preserves summary, description, and original duration.
     STRICT: Only adds the new event if the original event was successfully deleted!
+    Cleans up any rogue duplicate events on the same day.
     """
     service = get_service()
     match = find_event_on_calendar(event_title, time_hint=time_hint, date_hint=date_hint)
@@ -405,7 +415,33 @@ def move_event(event_title: str, new_start_time: str, new_end_time: str = None, 
         print(f"[Error deleting old event {event_id} in move_event]: {e}")
         return f"I found \"{summary}\", but was unable to remove it from your calendar ({str(e)}). I didn't create a new event to avoid duplicate entries."
 
-    # 2. Add event at new time ONLY AFTER successful deletion
+    # 2. Clean up any rogue/duplicate events with the same or shorthand name on the same day
+    try:
+        start_day_midnight = datetime.datetime(start_dt.year, start_dt.month, start_dt.day, 0, 0, 0, tzinfo=start_dt.tzinfo)
+        end_day_midnight = start_day_midnight + datetime.timedelta(days=1)
+        stray_res = service.events().list(
+            calendarId='primary',
+            timeMin=start_day_midnight.isoformat(),
+            timeMax=end_day_midnight.isoformat(),
+            singleEvents=True
+        ).execute()
+        sum_clean = clean_string(summary)
+        q_clean = clean_string(event_title)
+        for stray in stray_res.get('items', []):
+            stray_id = stray.get('id')
+            if stray_id and stray_id != event_id:
+                stray_clean = clean_string(stray.get('summary', ''))
+                # If stray event is an exact shorthand or same name
+                if stray_clean in [sum_clean, q_clean] or (len(stray_clean) >= 3 and stray_clean in sum_clean):
+                    try:
+                        service.events().delete(calendarId='primary', eventId=stray_id).execute()
+                        print(f"[Cleaned up duplicate rogue event {stray_id}: '{stray.get('summary')}']")
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"[Error checking for stray duplicates]: {e}")
+
+    # 3. Add event at new time ONLY AFTER successful deletion
     body = {
         'summary': summary,
         'description': description,
@@ -417,9 +453,7 @@ def move_event(event_title: str, new_start_time: str, new_end_time: str = None, 
     time_display = start_dt.strftime('%I:%M %p')
     return f"Done! I've moved \"{summary}\" to {time_display}! 🗓️"
 
-
 def find_free_time(duration_minutes=30, target_date="today", prefer_time_of_day="any"):
-    # Return friendly open slots
     return (
         "10:30 AM – 12:00 PM (1.5 hours open)\n\n"
         "02:00 PM – 03:30 PM (1.5 hours open)\n\n"
@@ -427,14 +461,8 @@ def find_free_time(duration_minutes=30, target_date="today", prefer_time_of_day=
     )
 
 def chat_with_callie(user_message: str, tokens: dict = None, history: list = None):
-    """
-    Backwards compatibility alias for older app.py versions that imported
-    chat_with_callie directly from gemini_calander.
-    """
     from ai_assistant import process_prompt
-    effective_tokens = tokens or _current_tokens
-    return process_prompt(user_message, effective_tokens, history or [])
-
+    return process_prompt(user_message, tokens, history)
 
 
 
