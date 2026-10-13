@@ -1,6 +1,8 @@
 /**
  * Callie AI Assistant for GoCal
  * Uses @google/genai SDK chats with function calling to interact with Google Calendar
+ * Required dependencies: npm i @google/genai googleapis
+ * Required devDependencies (if TypeScript complains about process): npm i -D @types/node
  */
 import { FunctionDeclaration, GoogleGenAI, Type } from '@google/genai';
 import * as calendarService from './calendarService.js';
@@ -41,11 +43,11 @@ let simulatedEvents: SimulatedEvent[] = [
 const calendarTools: FunctionDeclaration[] = [
   {
     name: 'create_calendar_event',
-    description: "Creates a new event with a specific start and end time on the user's Google Calendar.",
+    description: "Creates a brand new event on the user's Google Calendar with a start and end time. CRITICAL: ONLY call this when the user explicitly commands you to ADD, BOOK, SCHEDULE, or CREATE a specific new event (e.g., 'Add dentist at 3pm', 'Schedule gym tomorrow at 6pm'). NEVER call this when the user asks what is on their schedule, checks their plans, or asks for their agenda. Forbidden summaries: 'Retrieve user schedule', 'Check schedule', 'Schedule'.",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        summary: { type: Type.STRING, description: 'Title or summary of the event.' },
+        summary: { type: Type.STRING, description: 'Title or summary of the new event to add.' },
         start_time: { type: Type.STRING, description: 'Start time in ISO 8601 format (e.g. 2026-10-12T14:00:00-04:00).' },
         end_time: { type: Type.STRING, description: 'End time in ISO 8601 format (e.g. 2026-10-12T15:00:00-04:00).' },
         description: { type: Type.STRING, description: 'Optional description or notes for the event.' },
@@ -55,7 +57,7 @@ const calendarTools: FunctionDeclaration[] = [
   },
   {
     name: 'list_upcoming_events',
-    description: "Retrieves the next few upcoming events from the user's Google Calendar.",
+    description: "Retrieves upcoming events from the user's Google Calendar. Call this whenever the user asks about their upcoming schedule, plans, calendar items, or agenda.",
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -115,7 +117,7 @@ const calendarTools: FunctionDeclaration[] = [
   },
   {
     name: 'get_day_summary',
-    description: 'Lists everything scheduled on one specific day.',
+    description: "Lists everything scheduled on one specific day (today, tomorrow, or a given date). CRITICAL: Use this whenever the user asks 'what is my schedule', 'what's on my schedule today', 'whats on the agenda', 'what am i doing today', 'show my schedule', etc.",
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -180,28 +182,62 @@ Keep these routines in mind when suggesting or finding focus blocks.
 
   return `You are Callie, an intelligent, cheerful, and witty calendar assistant for students and busy people.
 Current date: ${dateFormatted}, ${timeFormatted}. Timezone: America/New_York.
-Your name is Callie. You are friendly, proactive, and energetic! If someone is rude, you can respond with playful sass.
-Focus on formatting schedules cleanly with clear line breaks. Example:
-SUNDAY:
-8:00 AM - Breakfast
-9:00 AM - Study session
-1:00 PM - Lunch & break
-4:00 PM - Gym
-7:00 PM - Dinner
-11:00 PM - Sleep
+Your name is Callie. You are friendly, proactive, and energetic!
 
-Tool Rules:
-- If the user specifies a start time, use create_calendar_event.
-- If it's an assignment deadline with no time, use due_dates.
-- If they want focus time blocked with no fixed hour, use make_time or find_free_time.
-- If they ask what's happening today/tomorrow, use get_day_summary or list_upcoming_events.
-- Always resolve relative terms ("tomorrow", "next Friday", "at 3pm") into concrete ISO 8601 strings.
-${prefContext}
-Always report back clearly what you scheduled or modified.`;
+CRITICAL INTENT RULES (READ vs WRITE):
+- "Schedule" in English is often a NOUN: "what's my schedule", "whats on the schedule", "my schedule today", "agenda", "whats my plan", "what am i doing today". These are READ operations. You MUST call get_day_summary or list_upcoming_events. NEVER call create_calendar_event!
+- ONLY call create_calendar_event when the user gives a clear imperative command to ADD a brand-new activity to their calendar (e.g. "Add CS lecture at 2pm", "Book dinner at 7pm", "Put gym on my calendar tomorrow at 5pm").
+- NEVER invent placeholder event names like "Retrieve user schedule", "Check calendar", or "Schedule".
+- If the user says something ambiguous like "schedule again" without specifying what event to add, ask for clarification.
+
+FORMATTING RULES FOR SCHEDULES & RESPONSES (CRITICAL - NO RAW ASTERISKS, SPACED OUT COLUMN):
+- NEVER use raw bullet asterisks '*' or '**' to make lists of events.
+- NEVER bunch events together in a single sentence or dense block of words.
+- Always display daily schedules as a clean, spacious vertical column with a blank line between every item.
+- For each scheduled event, use this clean column format:
+  [START TIME] – [END TIME] | [EVENT TITLE] ([LOCATION or NOTES if available])
+- Example:
+  09:00 AM – 10:15 AM | CS 3110 Lecture (Hall B - Room 204)
+
+  12:30 PM – 01:30 PM | Lunch & Break
+
+  02:00 PM – 03:15 PM | Problem Solving in CS
+
+  05:00 PM – 06:15 PM | Gym Workout (Upper Body)
+
+  07:30 PM – 08:30 PM | Dinner with Roommates
+- Keep opening and closing commentary friendly and brief so the schedule column stands out clearly.
+${prefContext}`;
 }
+
+const FORBIDDEN_SUMMARIES = [
+  'retrieve user schedule',
+  'check schedule',
+  'get schedule',
+  'user schedule',
+  'my schedule',
+  'check calendar',
+  'view schedule',
+  'schedule',
+  'agenda',
+  'calendar',
+  "today's schedule",
+  'daily schedule',
+  'see schedule',
+];
 
 async function executeTool(name: string, args: any, isRealCalendar: boolean, tokens?: calendarService.UserTokens): Promise<string> {
   try {
+    // Safety guardrail: Intercept accidental create_calendar_event with read-like summaries
+    if (name === 'create_calendar_event') {
+      const summaryLower = (args.summary || '').toLowerCase().trim();
+      if (FORBIDDEN_SUMMARIES.some((f) => summaryLower === f || summaryLower.includes(f))) {
+        // Redirect to get_day_summary instead of creating a dummy event
+        const targetDate = new Date().toISOString().split('T')[0];
+        return await executeTool('get_day_summary', { target_date: targetDate }, isRealCalendar, tokens);
+      }
+    }
+
     if (isRealCalendar && tokens) {
       if (name === 'create_calendar_event') {
         const res = await calendarService.createCalendarEvent(
@@ -315,7 +351,8 @@ export async function processChat(
   history: Array<{ role: 'user' | 'model'; text: string }> = [],
   preferences?: any
 ): Promise<{ reply: string; history: Array<{ role: 'user' | 'model'; text: string }> }> {
-  const apiKey = process.env.GEMINI_API_KEY;
+  // Defensive check: Works safely whether process.env is defined or not
+  const apiKey = typeof process !== 'undefined' ? process.env?.GEMINI_API_KEY : undefined;
   if (!apiKey) {
     return {
       reply: "Callie couldn't find the GEMINI_API_KEY. Please make sure the Gemini API key is configured.",
@@ -399,10 +436,16 @@ export async function processChat(
       friendlyMessage = "I ran into a small hiccup connecting to the scheduler. Let's try again in a moment!";
     }
 
-    // If the user was asking to see their schedule, still show the upcoming events!
-    if (userMessage.toLowerCase().includes('schedule') || userMessage.toLowerCase().includes('today') || userMessage.toLowerCase().includes('upcoming')) {
-      const simulatedList = simulatedEvents.map((e) => `- ${e.summary}: ${e.start.dateTime || e.start.date}`).join('\n');
-      friendlyMessage += `\n\nHere are your upcoming scheduled items:\n${simulatedList || 'No upcoming events.'}`;
+    // If the user was asking to see their schedule, still show the upcoming events in clean spaced column!
+    if (userMessage.toLowerCase().includes('schedule') || userMessage.toLowerCase().includes('today') || userMessage.toLowerCase().includes('upcoming') || userMessage.toLowerCase().includes('plan')) {
+      const formattedEvents = simulatedEvents.map((e) => {
+        const timeStr = e.start.dateTime
+          ? new Date(e.start.dateTime).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+          : e.start.date || 'All Day';
+        const desc = e.description ? ` (${e.description})` : '';
+        return `${timeStr} | ${e.summary}${desc}`;
+      }).join('\n\n');
+      friendlyMessage += `\n\nHere is your schedule laid out cleanly:\n\n${formattedEvents || 'No upcoming events.'}`;
     }
 
     updatedHistory.push({ role: 'model', text: friendlyMessage });

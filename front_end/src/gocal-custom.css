@@ -253,9 +253,25 @@ body {
 .ai-row { justify-content: flex-start; }
 .user-row { justify-content: flex-end; }
 
-.message-bubble { padding: 15px 25px; max-width: 60%; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-.ai-bubble { background-color: rgb(183, 228, 199); border-radius: 20px 20px 20px 0; }
-.user-bubble { background-color: rgb(168, 218, 220); border-radius: 20px 20px 0 20px; }
+.message-bubble { 
+    padding: 16px 24px; 
+    max-width: 82%; 
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.04); 
+    transition: all 0.2s ease;
+}
+@media (max-width: 768px) {
+    .message-bubble { max-width: 92%; padding: 14px 18px; }
+}
+.ai-bubble { 
+    background-color: rgb(183, 228, 199); 
+    border-radius: 22px 22px 22px 4px; 
+    border: 1px solid rgba(140, 207, 165, 0.4);
+}
+.user-bubble { 
+    background-color: rgb(168, 218, 220); 
+    border-radius: 22px 22px 4px 22px; 
+    border: 1px solid rgba(130, 195, 198, 0.4);
+}
 
 .chat-input-area {
     padding: 20px 40px;

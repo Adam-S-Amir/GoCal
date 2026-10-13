@@ -55,6 +55,182 @@ interface CalendarEvent {
   end?: { dateTime?: string; date?: string };
 }
 
+/**
+ * Renders messages without raw markdown asterisks,
+ * automatically formats schedules into clean, spaced-out columns with time badges,
+ * and ensures responses are never a cramped block of words.
+ */
+function FormattedMessage({ text, isAi }: { text: string; isAi: boolean }) {
+  if (!isAi) {
+    return <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text}</p>;
+  }
+
+  // Pre-process: split lines if schedule items were clumped on a single line with " * " or bullets
+  let processed = text;
+  // If multiple items are joined by " * **" or " * [time]", break them onto separate lines with blank line
+  processed = processed.replace(/([^\n])\s*\*\s+(?=\*?\*?\d{1,2}:\d{2})/gi, '$1\n\n');
+  processed = processed.replace(/([^\n])\s*\*\s+\*\*([^*]+)\*\*/g, '$1\n\n**$2**');
+
+  const rawLines = processed.split('\n');
+
+  // Helper to parse inline markdown bold (**bold**) and strip leftover stray asterisks
+  const renderInline = (str: string) => {
+    const parts = str.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
+    return parts.map((part, idx) => {
+      if ((part.startsWith('**') && part.endsWith('**')) || (part.startsWith('*') && part.endsWith('*'))) {
+        const clean = part.replace(/^\*+|\*+$/g, '').trim();
+        return <strong key={idx} className="font-bold text-[#1d3557]">{clean}</strong>;
+      }
+      const cleaned = part.replace(/\*/g, '');
+      return <span key={idx}>{cleaned}</span>;
+    });
+  };
+
+  interface ScheduleItem {
+    time: string;
+    title: string;
+    details?: string;
+  }
+
+  interface Block {
+    type: 'schedule' | 'bullet_list' | 'paragraph';
+    items?: ScheduleItem[];
+    bullets?: string[];
+    text?: string;
+  }
+
+  const blocks: Block[] = [];
+  let currentSchedule: ScheduleItem[] = [];
+  let currentBullets: string[] = [];
+
+  const flushSchedule = () => {
+    if (currentSchedule.length > 0) {
+      blocks.push({ type: 'schedule', items: [...currentSchedule] });
+      currentSchedule = [];
+    }
+  };
+
+  const flushBullets = () => {
+    if (currentBullets.length > 0) {
+      blocks.push({ type: 'bullet_list', bullets: [...currentBullets] });
+      currentBullets = [];
+    }
+  };
+
+  // Matches lines starting with time patterns, e.g.:
+  // - 03:00 PM – 04:30 PM | Intro to Psychology Lecture (PSH 101)
+  // - * **03:00 PM:** Intro to Psychology Lecture
+  // - 8:00 AM - Breakfast
+  // - **04:30 AM – 05:30 AM** | Wake up and eat
+  const scheduleLineRegex = /^[\s*\-•]*\*?\*?(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?(?:\s*(?:–|-|—|to)\s*\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?)?)\*?\*?\s*([|:–—\-])\s*(.+)$/i;
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const rawLine = rawLines[i].trim();
+    if (!rawLine) {
+      flushSchedule();
+      flushBullets();
+      continue;
+    }
+
+    const schedMatch = rawLine.match(scheduleLineRegex);
+    if (schedMatch) {
+      flushBullets();
+      const timeStr = schedMatch[1].trim();
+      const rest = schedMatch[3].trim().replace(/^\*+|\*+$/g, '');
+
+      let title = rest;
+      let details: string | undefined = undefined;
+
+      const parenMatch = rest.match(/^(.+?)\s*\(([^)]+)\)$/);
+      if (parenMatch) {
+        title = parenMatch[1].trim();
+        details = parenMatch[2].trim();
+      } else if (rest.includes(' - ')) {
+        const parts = rest.split(' - ');
+        title = parts[0].trim();
+        details = parts.slice(1).join(' - ').trim();
+      }
+
+      currentSchedule.push({
+        time: timeStr,
+        title: title.replace(/\*+/g, '').trim(),
+        details: details ? details.replace(/\*+/g, '').trim() : undefined,
+      });
+      continue;
+    }
+
+    // Regular bullet point
+    const bulletMatch = rawLine.match(/^[\s*\-•]\s*(.+)$/);
+    if (bulletMatch && !rawLine.startsWith('**')) {
+      flushSchedule();
+      currentBullets.push(bulletMatch[1].trim());
+      continue;
+    }
+
+    // Normal text paragraph
+    flushSchedule();
+    flushBullets();
+    blocks.push({ type: 'paragraph', text: rawLine });
+  }
+
+  flushSchedule();
+  flushBullets();
+
+  return (
+    <div className="flex flex-col gap-2.5 w-full">
+      {blocks.map((block, idx) => {
+        if (block.type === 'schedule' && block.items) {
+          return (
+            <div key={idx} className="my-2.5 flex flex-col gap-2.5 w-full">
+              {block.items.map((item, sIdx) => (
+                <div
+                  key={sIdx}
+                  className="flex items-start gap-3 p-3.5 rounded-xl bg-white/95 border border-emerald-300/80 shadow-xs hover:shadow-sm hover:border-emerald-400 transition-all"
+                >
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-100 text-emerald-900 font-bold text-xs tracking-wide shrink-0">
+                    <Clock className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>{item.time}</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-bold text-[#1d3557] text-[15px] leading-snug">
+                      {item.title}
+                    </div>
+                    {item.details && (
+                      <div className="text-xs text-gray-500 font-medium mt-1">
+                        {item.details}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        }
+
+        if (block.type === 'bullet_list' && block.bullets) {
+          return (
+            <ul key={idx} className="my-1.5 space-y-2 pl-1 w-full">
+              {block.bullets.map((bText, bIdx) => (
+                <li key={bIdx} className="flex items-start gap-2.5 text-[14.5px] text-[#1d3557]">
+                  <span className="w-2 h-2 rounded-full bg-emerald-600 mt-2 shrink-0" />
+                  <span className="flex-1 leading-relaxed">{renderInline(bText)}</span>
+                </li>
+              ))}
+            </ul>
+          );
+        }
+
+        // Paragraph
+        return (
+          <p key={idx} className="text-[15px] leading-relaxed text-[#1d3557]">
+            {renderInline(block.text || '')}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState<'home' | 'chat'>('home');
   const [messages, setMessages] = useState<Message[]>([
@@ -74,7 +250,7 @@ export default function App() {
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [copiedTab, setCopiedTab] = useState<string | null>(null);
-  const [activeCodeTab, setActiveCodeTab] = useState<'app' | 'google' | 'requirements'>('app');
+  const [activeCodeTab, setActiveCodeTab] = useState<'app' | 'google' | 'requirements' | 'ai_assistant'>('app');
 
   // Preferences form state
   const [preferences, setPreferences] = useState({
@@ -470,6 +646,225 @@ requests==2.32.3
 requests-oauthlib==2.0.0
 Werkzeug==3.1.3
 pydantic==2.10.6`,
+
+    ai_assistant: `import os
+import json
+import re
+import time
+import datetime
+from zoneinfo import ZoneInfo
+from dotenv import load_dotenv
+from google import genai
+import gemini_calander
+
+load_dotenv()
+
+MODEL = "gemini-3.1-flash-lite"
+
+FORBIDDEN_SUMMARIES = {
+    "retrieve user schedule",
+    "check schedule",
+    "get schedule",
+    "user schedule",
+    "my schedule",
+    "check calendar",
+    "view schedule",
+    "schedule",
+    "agenda",
+    "calendar",
+    "today's schedule",
+    "daily schedule",
+    "see schedule",
+}
+
+def build_system_instruction() -> str:
+    now = datetime.datetime.now(ZoneInfo("America/New_York"))
+    return f"""You are Callie, an energetic, cheerful, and witty calendar assistant for college students and busy people.
+Current time: {now.strftime("%A, %B %d, %Y %I:%M %p")} (America/New_York).
+Your name is Callie.
+Tone: Friendly, encouraging, witty, and organized.
+
+CRITICAL INTENT RULES (READ vs WRITE):
+- The word "schedule" is very often a NOUN: "what's my schedule", "whats on the schedule", "my schedule today", "agenda", "what am i doing today". These are READ operations. NEVER create an event when someone asks about their schedule.
+- ONLY create an event when the user explicitly commands you to ADD or BOOK a specific new activity (e.g. "Add CS lecture at 2pm", "Schedule gym tomorrow at 6pm").
+- NEVER invent placeholder event names like "Retrieve user schedule", "Check calendar", or "Schedule".
+
+FORMATTING RULES FOR SCHEDULES (SPACED VERTICAL COLUMN, NO RAW ASTERISKS):
+- NEVER output a dense block or clump of text.
+- NEVER use raw asterisks like '*' for list items.
+- Always display daily schedules as a clean, spacious vertical column with a blank line between every item.
+- For each scheduled event, use this clean column format:
+  [START TIME] – [END TIME] | [EVENT TITLE] ([LOCATION or NOTES if available])
+- Example layout:
+  09:00 AM – 10:15 AM | CS 3110 Lecture (Hall B)
+
+  12:30 PM – 01:30 PM | Lunch with Sarah (Campus Center)
+
+  04:00 PM – 05:15 PM | Gym Workout (Upper Body)
+
+  07:30 PM – 08:30 PM | Study Session (Library 3rd Floor)
+- Keep opening and closing commentary friendly and brief so the schedule column stands out clearly.
+"""
+
+def safe_generate_content(client, prompt: str, fallback_text: str = "") -> str:
+    for attempt in range(3):
+        try:
+            res = client.models.generate_content(model=MODEL, contents=prompt)
+            if res and res.text:
+                return res.text.strip()
+        except Exception as e:
+            err_str = str(e)
+            if ("503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str) and attempt < 2:
+                time.sleep(1.0 * (attempt + 1))
+                continue
+            break
+    return fallback_text
+
+def is_asking_for_schedule(msg_lower: str) -> bool:
+    if "schedule" in msg_lower:
+        if any(p in msg_lower for p in ["my schedule", "the schedule", "a schedule", "our schedule", "today's schedule"]):
+            return True
+        if any(ind in msg_lower for ind in ["what", "whats", "what's", "check", "show", "see", "view", "again"]):
+            return True
+
+    return any(p in msg_lower for p in [
+        "whats on", "what's on", "whats my", "what's my", "what do i have",
+        "what am i doing", "what am i up to", "my agenda", "upcoming events",
+        "any plans", "check calendar", "view calendar", "today's plan"
+    ])
+
+def is_asking_to_create_event(msg_lower: str) -> bool:
+    if is_asking_for_schedule(msg_lower):
+        return False
+
+    create_verbs = [
+        "add ", "add an ", "add a ", "put ", "book ", "set an event",
+        "set a meeting", "create an event", "create event", "schedule a ",
+        "schedule an ", "schedule gym", "schedule meeting", "schedule lunch",
+        "schedule dinner", "schedule workout", "schedule study", "schedule class",
+        "remind me to", "put on my calendar", "add to my calendar"
+    ]
+    return any(cv in msg_lower for cv in create_verbs)
+
+def process_prompt(user_message: str, tokens: dict, history: list[dict] | None = None):
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return "Error: GEMINI_API_KEY is missing from the .env file.", history or []
+
+    client = genai.Client(api_key=api_key)
+    reset_token = gemini_calander.set_tokens(tokens)
+    msg_lower = user_message.lower().strip()
+    now = datetime.datetime.now(ZoneInfo("America/New_York"))
+
+    is_delete_intent = any(w in msg_lower for w in ["remove", "delete", "cancel"]) and not is_asking_for_schedule(msg_lower)
+    is_free_time_query = any(w in msg_lower for w in ["free time", "open slot", "free slot", "open time", "when am i free"])
+    is_schedule_query = is_asking_for_schedule(msg_lower)
+    is_create_intent = is_asking_to_create_event(msg_lower) and not is_schedule_query
+
+    try:
+        if is_free_time_query:
+            target = "tomorrow" if "tomorrow" in msg_lower else "today"
+            free_slots = gemini_calander.find_free_time(30, target, "any")
+            prompt = f"""{build_system_instruction()}
+User asked: "{user_message}".
+Here is their real Google Calendar open slots data:
+{free_slots}
+
+Respond cheerfully in character as Callie and list their free slots vertically with clear spacing:"""
+            fallback = f"Here is what I found for your open slots:\\n\\n{free_slots}"
+            reply = safe_generate_content(client, prompt, fallback_text=fallback)
+
+        elif is_schedule_query:
+            if "tomorrow" in msg_lower:
+                tomorrow_date = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+                events = gemini_calander.get_day_summary(tomorrow_date)
+            elif "week" in msg_lower:
+                events = gemini_calander.list_upcoming_events(10)
+            else:
+                events = gemini_calander.get_day_summary("today")
+                if "nothing scheduled" in events.lower():
+                    upcoming = gemini_calander.list_upcoming_events(5)
+                    events = f"Nothing scheduled for today.\\nUpcoming items:\\n{upcoming}"
+
+            prompt = f"""{build_system_instruction()}
+User asked: "{user_message}".
+Here is their actual live Google Calendar data:
+{events}
+
+Respond in character as Callie. Lay out their schedule in a clean vertical column with an empty line between each event. Do not use raw asterisks:"""
+            fallback = f"Here is what's on your schedule:\\n\\n{events}"
+            reply = safe_generate_content(client, prompt, fallback_text=fallback)
+
+        elif is_create_intent:
+            extract_prompt = f"""Extract the event details from this user request.
+Current time: {now.strftime("%A, %B %d, %Y %I:%M %p")} EDT.
+User request: "{user_message}"
+Output ONLY a raw JSON object with no markdown:
+{{"summary": "Event Title", "start_time": "YYYY-MM-DDTHH:MM:SS-04:00", "end_time": "YYYY-MM-DDTHH:MM:SS-04:00"}}"""
+            raw_text = safe_generate_content(client, extract_prompt, fallback_text="")
+            if chr(96) * 3 in raw_text:
+                raw_text = raw_text.replace(chr(96) * 3, "").replace("json", "").strip()
+
+            try:
+                event_data = json.loads(raw_text)
+                summary = event_data.get("summary", "New Event").strip()
+
+                if summary.lower() in FORBIDDEN_SUMMARIES or "schedule" in summary.lower():
+                    events = gemini_calander.get_day_summary("today")
+                    reply = f"Here is what is currently on your schedule:\\n\\n{events}"
+                else:
+                    start_time = event_data.get("start_time")
+                    end_time = event_data.get("end_time")
+                    if not end_time and start_time:
+                        st = datetime.datetime.fromisoformat(start_time)
+                        end_time = (st + datetime.timedelta(hours=1)).isoformat()
+
+                    if start_time and end_time:
+                        gemini_calander.create_calendar_event(summary, start_time, end_time, "Created by Callie")
+                        st_formatted = datetime.datetime.fromisoformat(start_time).strftime("%I:%M %p")
+                        reply = f"All set! I've added {summary} for {st_formatted} to your Google Calendar! 🗓️"
+                    else:
+                        reply = f"I'd love to schedule {summary} for you! What time and day would you like it booked?"
+            except Exception:
+                reply = "I'm ready to schedule that! Could you confirm the exact start time and day?"
+
+        elif is_delete_intent:
+            extract_prompt = f"""Extract the event title to remove from: "{user_message}".
+Output ONLY raw JSON: {{"title": "Title to remove"}}"""
+            raw_text = safe_generate_content(client, extract_prompt, fallback_text="")
+            if chr(96) * 3 in raw_text:
+                raw_text = raw_text.replace(chr(96) * 3, "").replace("json", "").strip()
+            try:
+                data = json.loads(raw_text)
+                title = data.get("title", "")
+                reply = gemini_calander.remove_event(title)
+            except Exception:
+                reply = "Which event title would you like me to remove from your calendar?"
+
+        else:
+            context = ""
+            if history:
+                recent = [f"{t['role'].capitalize()}: {t['text']}" for t in history[-3:] if "error" not in t.get("text", "").lower()]
+                context = "Recent conversation:\\n" + "\\n".join(recent) + "\\n\\n"
+
+            prompt = f"{build_system_instruction()}\\n\\n{context}User: {user_message}\\nCallie:"
+            fallback = "Hi there! I'm Callie, your calendar assistant. How can I help you today?"
+            reply = safe_generate_content(client, prompt, fallback_text=fallback)
+
+        new_history = list(history or [])
+        new_history.append({"role": "user", "text": user_message})
+        new_history.append({"role": "model", "text": reply})
+        return reply, new_history
+
+    except Exception as e:
+        print(f"[Callie Error]: {e}")
+        try:
+            events = gemini_calander.list_upcoming_events(5)
+            return f"Here is what's coming up on your calendar:\\n\\n{events}", history or []
+        except Exception:
+            return "Hi! How can I help you organize your calendar today?", history or []
+    finally:
+        gemini_calander.reset_tokens(reset_token)`,
   };
 
   return (
@@ -932,7 +1327,7 @@ pydantic==2.10.6`,
                       msg.sender === 'ai' ? 'ai-bubble' : 'user-bubble'
                     }`}
                   >
-                    <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{msg.text}</p>
+                    <FormattedMessage text={msg.text} isAi={msg.sender === 'ai'} />
                   </div>
                 </div>
               ))}
@@ -1164,14 +1559,14 @@ pydantic==2.10.6`,
                   <div className="font-bold text-gray-800 text-xs uppercase tracking-wider">
                     Fixed Code Files for Your GitHub Repository
                   </div>
-                  <div className="flex items-center gap-1 bg-gray-100 p-0.5 rounded-lg">
+                  <div className="flex items-center gap-1 bg-gray-100 p-0.5 rounded-lg flex-wrap">
                     <button
                       onClick={() => setActiveCodeTab('app')}
                       className={`px-2.5 py-1 rounded text-xs font-semibold ${
                         activeCodeTab === 'app' ? 'bg-white shadow-2xs text-[#1d3557]' : 'text-gray-600'
                       }`}
                     >
-                      back_end/app.py
+                      app.py
                     </button>
                     <button
                       onClick={() => setActiveCodeTab('google')}
@@ -1180,6 +1575,14 @@ pydantic==2.10.6`,
                       }`}
                     >
                       google_service.py
+                    </button>
+                    <button
+                      onClick={() => setActiveCodeTab('ai_assistant')}
+                      className={`px-2.5 py-1 rounded text-xs font-semibold ${
+                        activeCodeTab === 'ai_assistant' ? 'bg-white shadow-2xs text-[#1d3557]' : 'text-gray-600'
+                      }`}
+                    >
+                      ai_assistant.py
                     </button>
                     <button
                       onClick={() => setActiveCodeTab('requirements')}
