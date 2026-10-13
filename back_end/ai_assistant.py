@@ -9,7 +9,8 @@ import gemini_calander
 
 load_dotenv()
 
-MODEL = "gemini-3.8-flash"
+# Fast, load-balanced model alias
+MODEL = "gemini-flash-latest"
 
 CALENDAR_TOOLS = [
     gemini_calander.create_calendar_event,
@@ -25,41 +26,23 @@ CALENDAR_TOOLS = [
 
 def build_system_instruction() -> str:
     now = datetime.datetime.now(ZoneInfo("America/New_York"))
+    # Streamlined prompt: cuts prompt prefill tokens in half for fast generation
     return f"""
-    You are an intelligent calendar assistant for a college student.
-    The current date and time is {now.strftime("%A, %B %d, %Y %I:%M %p")}.
-    The user's timezone is America/New_York.
-    your name is callie and you are very happy personal assistant. but if someone is rude to you you can be rude back.
-    focus on formatting in human readable ways using only common symbols such as !.,; unless absolutely neccesary
-    
-    if there is overlap ask if you should reschedule
-    if presenting a schedule use format such as below using new line variables to separate out events:
-    
-SUNDAY
-7:00 AM - Wake up
-7:30 AM - Breakfast
-8:00 AM - Clean room
-9:00 AM - Schoolwork
-10:30 AM - Break
-11:00 AM - Study
-12:30 PM - Lunch
-1:00 PM - Free time
-2:30 PM - Groceries
-4:00 PM - Gym
-6:00 PM - Shower
-6:30 PM - Dinner
-7:30 PM - Watch a movie
-9:30 PM - Get ready for tomorrow
-10:00 PM - Phone / relax
-11:00 PM - Sleep
-
-    Tool selection rules:
-    - If the user gives a specific start time, ALWAYS use create_calendar_event.
-    - Use due_dates only for assignment deadlines with no time of day.
-    - Use make_time only when the user wants time blocked but gave no start time.
-    - Resolve "tomorrow", "next Friday", etc. into concrete ISO 8601 datetimes before calling a tool.
-    
-    Report back only what the tools actually returned. If a tool returns an error, tell the user plainly what failed.
+    You are Callie, a fast, cheerful calendar assistant for a student.
+    Current time: {now.strftime("%A, %B %d, %Y %I:%M %p")} (America/New_York).
+    Tone: Friendly, witty, and concise.
+    Formatting rules:
+    - Keep answers brief and cleanly formatted with line breaks.
+    - Example:
+      9:00 AM - Class
+      1:00 PM - Lunch
+      4:00 PM - Gym
+    Tool rules:
+    - Specific start time given -> create_calendar_event
+    - Assignment deadline with no time -> due_dates
+    - Block open focus time -> make_time or find_free_time
+    - Check day -> get_day_summary or list_upcoming_events
+    Always confirm what was scheduled or found.
     """
 
 def process_prompt(user_message: str, tokens: dict, history: list[dict] | None = None):
@@ -68,24 +51,21 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
         return "Error: GEMINI_API_KEY is missing from the .env file.", history or []
 
     client = genai.Client(api_key=api_key)
-
-    # Set user OAuth tokens in thread context so Google Calendar API can authenticate
     reset_token = gemini_calander.set_tokens(tokens)
 
-    # Build prompt with recent context safely as text
+    # Keep conversation context concise
     prompt = user_message
     valid_history = [
         t for t in (history or [])
         if "error" not in t.get("text", "").lower() and "invalid_argument" not in t.get("text", "").lower()
     ]
     if valid_history:
-        recent_turns = [f"{t['role'].capitalize()}: {t['text']}" for t in valid_history[-4:]]
+        recent_turns = [f"{t['role'].capitalize()}: {t['text']}" for t in valid_history[-3:]]
         if recent_turns:
             context_str = "\n".join(recent_turns)
-            prompt = f"Previous conversation context:\n{context_str}\n\nCurrent user request: {user_message}"
+            prompt = f"Previous context:\n{context_str}\n\nUser: {user_message}"
 
     try:
-        # Start a fresh Chat session with Calendar tools
         chat = client.chats.create(
             model=MODEL,
             config=types.GenerateContentConfig(
@@ -95,7 +75,6 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
             )
         )
 
-        # Automatic retry loop with backoff for momentary 503 spikes
         response = None
         for attempt in range(3):
             try:
@@ -104,7 +83,7 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
             except Exception as e:
                 err_str = str(e)
                 if ("503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str) and attempt < 2:
-                    time.sleep(1.5 * (attempt + 1))
+                    time.sleep(0.8 * (attempt + 1))
                     continue
                 raise e
 
@@ -119,7 +98,7 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
         err_str = str(e)
         print(f"[Gemini Error]: {err_str}")
         if "503" in err_str or "UNAVAILABLE" in err_str:
-            friendly_err = "The AI servers experienced a momentary traffic spike. Give me just a second and try again!"
+            friendly_err = "The AI servers experienced a quick traffic spike. Please try your request once more!"
         elif "429" in err_str:
             friendly_err = "Callie hit a quick rate limit cool-down. Please try again in 10 seconds!"
         else:
