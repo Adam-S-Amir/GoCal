@@ -1,6 +1,5 @@
 import os
 import datetime
-import contextvars
 from zoneinfo import ZoneInfo
 from google_service import get_calendar_service
 
@@ -10,28 +9,28 @@ TZ = ZoneInfo(TZ_NAME)
 DAY_START_HOUR = 8
 DAY_END_HOUR = 22
 
-_tokens_var = contextvars.ContextVar("gocal_tokens", default=None)
-_service_var = contextvars.ContextVar("gocal_service", default=None)
+_current_tokens = None
+_current_service = None
 
 def set_tokens(tokens: dict):
-    _service_var.set(None)  # Reset cached service instance for each new request
-    return _tokens_var.set(tokens)
+    global _current_tokens, _current_service
+    _current_tokens = tokens
+    _current_service = None
+    return tokens
 
 def reset_tokens(token) -> None:
-    _service_var.set(None)
-    _tokens_var.reset(token)
+    global _current_tokens, _current_service
+    _current_tokens = None
+    _current_service = None
 
 def _service():
-    # Reuse cached Google Calendar service within the same request (saves ~1.5s per tool call)
-    svc = _service_var.get()
-    if svc is not None:
-        return svc
-    tokens = _tokens_var.get()
-    if not tokens:
-        raise RuntimeError("No Google OAuth tokens in current request context.")
-    svc = get_calendar_service(tokens)
-    _service_var.set(svc)
-    return svc
+    global _current_tokens, _current_service
+    if _current_service is not None:
+        return _current_service
+    if not _current_tokens:
+        raise RuntimeError("No Google OAuth tokens provided in request.")
+    _current_service = get_calendar_service(_current_tokens)
+    return _current_service
 
 def _now():
     return datetime.datetime.now(TZ)
@@ -73,7 +72,7 @@ def _events_for_day(service, date_str: str):
         timeMax=end,
         singleEvents=True,
         orderBy="startTime",
-        fields="items(id,summary,start,end,htmlLink)",  # Lightweight payload filter (saves ~400ms)
+        fields="items(id,summary,start,end,htmlLink)",
     ).execute()
     return result.get("items", [])
 
@@ -92,7 +91,6 @@ def _open_gaps(date_str: str, blocks):
     d = datetime.date.fromisoformat(date_clean)
     now = _now()
 
-    # Start from 8 AM or from current time if checking today
     cursor = datetime.datetime.combine(d, datetime.time(DAY_START_HOUR), tzinfo=TZ)
     if d == now.date() and now > cursor:
         cursor = now
@@ -164,11 +162,11 @@ def list_upcoming_events(max_results: int) -> str:
             maxResults=limit,
             singleEvents=True,
             orderBy="startTime",
-            fields="items(id,summary,start,end)",  # Lightweight payload
+            fields="items(id,summary,start,end)",
         ).execute()
         events = result.get("items", [])
         if not events:
-            return "No upcoming events found."
+            return "No upcoming events found on your calendar."
         lines = []
         for e in events:
             start = e["start"].get("dateTime", e["start"].get("date"))
