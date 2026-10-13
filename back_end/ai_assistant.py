@@ -1,4 +1,5 @@
 import os
+import time
 import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -71,7 +72,7 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
     # Set user OAuth tokens in thread context so Google Calendar API can authenticate
     reset_token = gemini_calander.set_tokens(tokens)
 
-    # Build prompt with recent context safely as text (prevents thought_signature position errors)
+    # Build prompt with recent context safely as text
     prompt = user_message
     valid_history = [
         t for t in (history or [])
@@ -94,8 +95,20 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
             )
         )
 
-        response = chat.send_message(prompt)
-        reply = response.text or "I've checked and updated your calendar!"
+        # Automatic retry loop with backoff for momentary 503 spikes
+        response = None
+        for attempt in range(3):
+            try:
+                response = chat.send_message(prompt)
+                break
+            except Exception as e:
+                err_str = str(e)
+                if ("503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str) and attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise e
+
+        reply = response.text if response else "I've checked and updated your calendar!"
 
         new_history = list(valid_history)
         new_history.append({"role": "user", "text": user_message})
@@ -103,9 +116,15 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
         return reply, new_history
 
     except Exception as e:
-        print(f"[Gemini Error]: {e}")
-        error_msg = f"Sorry, I had trouble with that request: {e}"
-        return error_msg, valid_history
+        err_str = str(e)
+        print(f"[Gemini Error]: {err_str}")
+        if "503" in err_str or "UNAVAILABLE" in err_str:
+            friendly_err = "The AI servers experienced a momentary traffic spike. Give me just a second and try again!"
+        elif "429" in err_str:
+            friendly_err = "Callie hit a quick rate limit cool-down. Please try again in 10 seconds!"
+        else:
+            friendly_err = f"Sorry, I had trouble with that request: {err_str}"
+        return friendly_err, valid_history
 
     finally:
         gemini_calander.reset_tokens(reset_token)
