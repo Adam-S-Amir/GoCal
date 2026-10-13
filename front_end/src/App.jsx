@@ -54,7 +54,6 @@ function App() {
   };
 
   const handleLogin = () => {
-    // Passes your frontend URL to the backend so it always redirects back here
     window.location.href = `${API_BASE_URL}/login?redirect_to=${encodeURIComponent(window.location.origin)}`;
   };
 
@@ -74,7 +73,14 @@ function App() {
         credentials: "include",
         body: JSON.stringify({ message: userMessageText }),
       });
-      const data = await response.json();
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (e) {
+        const text = await response.text();
+        throw new Error(`Server returned: ${text || response.status}`);
+      }
 
       if (response.ok) {
         setMessages((prev) => [...prev, { sender: "ai", text: data.reply }]);
@@ -83,7 +89,7 @@ function App() {
           ...prev,
           {
             sender: "ai",
-            text: "You are not signed in. Please log in with Google on the home page first.",
+            text: "Your session expired. Please log in with Google on the home page first.",
           },
         ]);
       } else {
@@ -93,9 +99,10 @@ function App() {
         ]);
       }
     } catch (error) {
+      console.error("Chat error:", error);
       setMessages((prev) => [
         ...prev,
-        { sender: "ai", text: "Network error connecting to Callie backend." },
+        { sender: "ai", text: `Connection issue: ${error.message || "Failed to reach Callie"}` },
       ]);
     } finally {
       setIsLoading(false);
@@ -104,6 +111,17 @@ function App() {
 
   const handleKeyPress = (e) => {
     if (e.key === "Enter") handleSendMessage();
+  };
+
+  // Helper to format text with bold markdown and line breaks
+  const renderFormattedText = (text) => {
+    const parts = text.split(/(\*\*.*?\*\*)/g);
+    return parts.map((part, i) => {
+      if (part.startsWith("**") && part.endsWith("**")) {
+        return <strong key={i} style={{ color: "#111827", fontWeight: "700" }}>{part.slice(2, -2)}</strong>;
+      }
+      return part;
+    });
   };
 
   const todayDateFormatted = new Date().toLocaleDateString("en-US", {
@@ -295,15 +313,18 @@ function App() {
             <div className="chat-messages" ref={chatMessagesRef}>
               {messages.map((msg, index) => (
                 <div key={index} className={`message-row ${msg.sender === "ai" ? "ai-row" : "user-row"}`}>
-                  <div className={`message-bubble ${msg.sender === "ai" ? "ai-bubble" : "user-bubble"}`}>
-                    <p>{msg.text}</p>
+                  <div
+                    className={`message-bubble ${msg.sender === "ai" ? "ai-bubble" : "user-bubble"}`}
+                    style={{ whiteSpace: "pre-wrap", lineHeight: "1.7" }}
+                  >
+                    {renderFormattedText(msg.text)}
                   </div>
                 </div>
               ))}
               {isLoading && (
                 <div className="message-row ai-row">
                   <div className="message-bubble ai-bubble">
-                    <p style={{ fontStyle: "italic", opacity: 0.7 }}>Callie is updating your schedule...</p>
+                    <p style={{ fontStyle: "italic", opacity: 0.7 }}>Callie is checking your calendar...</p>
                   </div>
                 </div>
               )}

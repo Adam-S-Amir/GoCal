@@ -19,13 +19,20 @@ def build_system_instruction() -> str:
     Current time: {now.strftime("%A, %B %d, %Y %I:%M %p")} (America/New_York).
     Your name is Callie.
     Tone: Friendly, encouraging, and witty.
-    Formatting rules:
-    - Keep answers clean, concise, and easy to read.
-    - Format lists and schedules with line breaks and bullets.
+    
+    FORMATTING RULES FOR SCHEDULES:
+    - Always display schedules as a clean vertical column.
+    - Put each event on its own line with a blank line between them so it is easy to read.
+    - Example layout:
+      **09:00 AM – 10:15 AM** | CS 3110 Lecture
+      
+      **12:30 PM – 01:30 PM** | Lunch with Sarah
+      
+      **04:00 PM – 05:15 PM** | Gym (Upper Body)
     """
 
 def safe_generate_content(client, prompt: str, fallback_text: str = "") -> str:
-    """Retries 3 times on 503/429 spikes, and falls back to real calendar data if AI servers blip."""
+    """Retries up to 3 times on temporary 503/429 spikes, and falls back to real calendar data if needed."""
     for attempt in range(3):
         try:
             res = client.models.generate_content(model=MODEL, contents=prompt)
@@ -56,7 +63,7 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
     is_delete_intent = any(w in msg_lower for w in ["remove", "delete", "cancel"])
     is_free_time_query = any(w in msg_lower for w in ["free time", "open slot", "free slot", "open time", "when am i free"])
     is_schedule_query = any(w in msg_lower for w in [
-        "schedule", "agenda", "plan", "calendar", "events", "what do i have", "whats on", "what's on", "whats my", "what's my"
+        "schedule", "agenda", "plan", "calendar", "events", "what do i have", "whats on", "what's on", "whats my", "what's my", "doing today"
     ]) and not is_create_intent and not is_delete_intent
 
     try:
@@ -64,12 +71,13 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
         if is_free_time_query:
             target = "tomorrow" if "tomorrow" in msg_lower else "today"
             free_slots = gemini_calander.find_free_time(30, target, "any")
-            prompt = f"""You are Callie. The user asked: "{user_message}".
-Here is their real Google Calendar free slots data:
+            prompt = f"""{build_system_instruction()}
+User asked: "{user_message}".
+Here is their real Google Calendar open slots data:
 {free_slots}
 
-Respond cheerfully in character as Callie and tell them when they are free with clean formatting:"""
-            fallback = f"Here is what I found for your open slots:\n{free_slots}"
+Respond cheerfully in character as Callie and list their free slots vertically:"""
+            fallback = f"Here is what I found for your open slots:\n\n{free_slots}"
             reply = safe_generate_content(client, prompt, fallback_text=fallback)
 
         # 2. SCHEDULE INSPECTION INTENT
@@ -85,12 +93,13 @@ Respond cheerfully in character as Callie and tell them when they are free with 
                     upcoming = gemini_calander.list_upcoming_events(5)
                     events = f"Nothing scheduled for today.\nUpcoming items:\n{upcoming}"
 
-            prompt = f"""You are Callie. The user asked: "{user_message}".
+            prompt = f"""{build_system_instruction()}
+User asked: "{user_message}".
 Here is their actual live Google Calendar data:
 {events}
 
-Respond in character as Callie. Present their schedule cleanly with bullets and line breaks:"""
-            fallback = f"Here is what's on your schedule for today:\n{events}"
+Respond in character as Callie. Lay out their schedule in a clean vertical column with an empty line between each event:"""
+            fallback = f"Here is what's on your schedule for today:\n\n{events}"
             reply = safe_generate_content(client, prompt, fallback_text=fallback)
 
         # 3. ADD / SCHEDULE EVENT INTENT
@@ -116,7 +125,7 @@ Output ONLY a raw JSON object with no markdown:
 
                 gemini_calander.create_calendar_event(summary, start_time, end_time, "Created by Callie")
                 st_formatted = datetime.datetime.fromisoformat(start_time).strftime("%I:%M %p")
-                reply = f"All set! I've added '{summary}' for {st_formatted} to your Google Calendar! 🗓️"
+                reply = f"All set! I've added **{summary}** for **{st_formatted}** to your Google Calendar! 🗓️"
             except Exception:
                 reply = "I'm ready to schedule that! Could you confirm the exact start time and day?"
 
@@ -152,10 +161,9 @@ Output ONLY raw JSON: {{"title": "Title to remove"}}"""
 
     except Exception as e:
         print(f"[Callie Error]: {e}")
-        # Even on an unexpected exception, try to show the upcoming events directly
         try:
             events = gemini_calander.list_upcoming_events(5)
-            return f"Here is what's coming up on your calendar:\n{events}", history or []
+            return f"Here is what's coming up on your calendar:\n\n{events}", history or []
         except Exception:
             return "Hi! How can I help you organize your calendar today?", history or []
 
