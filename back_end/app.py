@@ -4,41 +4,43 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from werkzeug.middleware.proxy_fix import ProxyFix
 from google_service import get_oauth_flow
-from gemini_calander import chat_with_callie
+from gemini_calander import list_upcoming_events
+from ai_assistant import process_prompt
 
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = os.getenv("SESSION_SECRET", "super-secret-key-change-in-prod-xyz123")
+app.secret_key = os.getenv("SESSION_SECRET", "super_secret_dev_key_change_in_production")
 
-# Enable ProxyFix so Werkzeug correctly reads X-Forwarded-Proto (https) from Render's reverse proxy
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+# Fix reverse proxy headers (CRITICAL on Render)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
 
-# Session cookie configuration for cross-site Google OAuth redirects
+# Ensure cookies are preserved cross-site when Google redirects
 app.config.update(
-    SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_SAMESITE="None",
+    SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_HTTPONLY=True,
 )
 
-# Enable CORS for frontend clients
+if os.getenv("FLASK_ENV") == "development" or os.getenv("LOCAL_DEV") == "1":
+    os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
 default_origins = "https://gocal.us,http://localhost:3000,http://localhost:5173"
 allowed_origins = [
     origin.strip()
     for origin in os.getenv("ALLOWED_ORIGINS", default_origins).split(",")
     if origin.strip()
 ]
-CORS(app, supports_credentials=True, origins=allowed_origins)
+CORS(app, supports_credentials=True, origins=allowed_origins if allowed_origins else "*")
 
 def get_effective_redirect_uri():
-    override = os.getenv("GOOGLE_REDIRECT_URI")
-    if override:
-        return override
+    configured = os.getenv("GOOGLE_REDIRECT_URI")
+    if configured and configured.startswith("http"):
+        return configured
     scheme = request.headers.get('X-Forwarded-Proto', request.scheme)
     return f"{scheme}://{request.host}/api/auth/callback"
 
 def get_frontend_target():
-    # Priority: 1) redirect_to passed during login, 2) FRONTEND_URL env var, 3) fallback to https://gocal.us
     target = session.pop('redirect_to', None) or os.getenv("FRONTEND_URL", "https://gocal.us")
     if target and not (target.startswith("http://") or target.startswith("https://") or target.startswith("/")):
         target = f"https://{target}"
@@ -52,7 +54,6 @@ def home():
 
 @app.route('/login')
 def login():
-    # Save the return destination passed by frontend (e.g. /login?redirect_to=https://gocal.us)
     redirect_to = request.args.get('redirect_to')
     if redirect_to:
         session['redirect_to'] = redirect_to
@@ -93,25 +94,27 @@ def callback():
     state = session.get('state')
     redirect_uri = get_effective_redirect_uri()
 
-    # Reconstruct request URL with https if terminated by reverse proxy
-    auth_response_url = request.url
-    if request.headers.get('X-Forwarded-Proto') == 'https' and auth_response_url.startswith('http://'):
-        auth_response_url = auth_response_url.replace('http://', 'https://', 1)
-
     try:
         flow = get_oauth_flow(state=state, redirect_uri=redirect_uri)
-        if session.get('code_verifier'):
-            flow.code_verifier = session.get('code_verifier')
+        code_verifier = session.get('code_verifier')
+        if code_verifier:
+            flow.code_verifier = code_verifier
 
-        flow.fetch_token(authorization_response=auth_response_url)
+        flow.fetch_token(authorization_response=request.url)
         creds = flow.credentials
 
-        existing_tokens = session.get('tokens', {})
-        refresh_token = creds.refresh_token or existing_tokens.get('refresh_token')
+        refresh_token = creds.refresh_token
+        if not refresh_token and 'tokens' in session:
+            refresh_token = session['tokens'].get('refresh_token')
 
         session['tokens'] = {
-            'access_token': creds.token,
+            'token': creds.token,
             'refresh_token': refresh_token,
+            'token_uri': creds.token_uri,
+            'client_id': creds.client_id,
+            'client_secret': creds.client_secret,
+            'scopes': creds.scopes,
+            'access_token': creds.token,
         }
 
         target_url = get_frontend_target()
@@ -131,48 +134,66 @@ def handle_404(e):
 
 @app.route('/api/auth/status')
 def auth_status():
-    is_authenticated = 'tokens' in session and session['tokens'].get('access_token') is not None
+    has_tokens = 'tokens' in session
     return jsonify({
-        'authenticated': bool(is_authenticated),
-        'hasRefreshToken': bool(session.get('tokens', {}).get('refresh_token'))
+        'authenticated': has_tokens,
+        'effective_redirect_uri': get_effective_redirect_uri(),
+        'has_refresh_token': bool(session.get('tokens', {}).get('refresh_token')) if has_tokens else False
     })
 
-@app.route('/api/auth/logout', methods=['POST', 'GET'])
+@app.route('/api/auth/logout', methods=['POST'])
 def logout():
     session.pop('tokens', None)
-    session.pop('state', None)
-    session.pop('code_verifier', None)
     session.pop('chat_history', None)
-    return jsonify({'ok': True, 'message': 'Logged out successfully'})
+    return jsonify({'ok': True})
+
+@app.route('/healthz')
+@app.route('/api/health')
+def healthz():
+    return jsonify({'status': 'ok', 'service': 'gocal-backend'})
+
+@app.route('/api')
+def api_index():
+    return jsonify({
+        'message': 'GoCal Backend API is running',
+        'endpoints': ['/api/auth/status', '/api/auth/url', '/api/auth/callback', '/api/events', '/api/chat', '/api/preferences']
+    })
+
+@app.route('/events')
+@app.route('/api/events')
+def get_events():
+    if 'tokens' not in session:
+        return jsonify({'error': 'Not authenticated. Visit /login first.'}), 401
+    try:
+        events = list_upcoming_events(session['tokens'])
+        return jsonify(events)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/preferences', methods=['GET', 'POST'])
+def preferences():
+    if request.method == 'POST':
+        data = request.get_json() or {}
+        session['preferences'] = data
+        return jsonify({'ok': True, 'preferences': data})
+    return jsonify(session.get('preferences', {}))
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    data = request.get_json() or {}
-    user_message = data.get('message', '').strip()
-    user_preferences = data.get('preferences', {})
+    if 'tokens' not in session:
+        return jsonify({'error': 'Not authenticated. Visit /login first.'}), 401
 
-    if not user_message:
-        return jsonify({'error': 'Message cannot be empty'}), 400
+    data = request.get_json()
+    if not data or 'message' not in data:
+        return jsonify({'error': 'Missing "message" in request payload'}), 400
 
-    tokens = session.get('tokens')
-    if not tokens:
-        return jsonify({
-            'error': 'Unauthorized',
-            'message': 'Please connect your Google Calendar first.'
-        }), 401
-
-    if 'chat_history' not in session:
-        session['chat_history'] = []
+    user_message = data['message']
 
     try:
-        callie_response = chat_with_callie(
-            user_message=user_message,
-            tokens=tokens,
-            chat_history=session['chat_history'],
-            user_preferences=user_preferences
-        )
-        session.modified = True
-        return jsonify({'reply': callie_response})
+        history = session.get('chat_history', [])
+        ai_response, history = process_prompt(user_message, session['tokens'], history)
+        session['chat_history'] = history
+        return jsonify({'reply': ai_response})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
