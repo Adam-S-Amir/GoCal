@@ -176,10 +176,11 @@ User request: "{user_message}"
 Instructions:
 - "title": Core title/name of the event to reschedule (e.g. "Lunch", "Gym", "CS 3110"). If the user only gave a time (e.g., "move my 2pm to 4pm"), set title to "".
 - "original_time": The current/original time of the event if mentioned (e.g., "2:00 PM", "2pm", "10:30 AM", or null).
-- "new_start_time": ISO-8601 string in Eastern Time with timezone offset for the new start time (e.g. "2026-10-13T16:00:00-04:00").
+- "original_date": The date of the original event if mentioned (e.g., "yesterday", "tomorrow", "today", "2026-10-12", or null).
+- "new_start_time": ISO-8601 string in Eastern Time with timezone offset for the new target start time (e.g. "2026-10-13T16:00:00-04:00").
 
 Output ONLY a raw JSON object:
-{{"title": "Event Name", "original_time": "2:00 PM", "new_start_time": "YYYY-MM-DDTHH:MM:SS-04:00"}}"""
+{{"title": "Event Name", "original_time": "2:00 PM", "original_date": "yesterday or null", "new_start_time": "YYYY-MM-DDTHH:MM:SS-04:00"}}"""
             raw_text = safe_generate_content(client, extract_prompt, fallback_text="")
             if "```" in raw_text:
                 raw_text = re.sub(r"```(json)?", "", raw_text).replace("```", "").strip()
@@ -188,9 +189,10 @@ Output ONLY a raw JSON object:
                 data = json.loads(json_match.group(0)) if json_match else json.loads(raw_text)
                 title = data.get("title", "").strip()
                 orig_time = data.get("original_time")
+                orig_date = data.get("original_date")
                 new_start = data.get("new_start_time", "").strip()
                 if new_start:
-                    reply = gemini_calander.move_event(title, new_start, time_hint=orig_time)
+                    reply = gemini_calander.move_event(title, new_start, time_hint=orig_time, date_hint=orig_date)
                 else:
                     reply = f"I'd love to reschedule that for you! What new time and date should I move it to?"
             except Exception as e:
@@ -199,9 +201,9 @@ Output ONLY a raw JSON object:
 
         # 4. REMOVE / CANCEL EVENT INTENT
         elif is_delete_intent:
-            extract_prompt = f"""Extract the event title or time to remove from: "{user_message}".
+            extract_prompt = f"""Extract the event title, time, or date to remove from: "{user_message}".
 Current time: {now.strftime("%A, %B %d, %Y %I:%M %p")} America/New_York.
-Output ONLY raw JSON: {{"title": "Title to remove", "time_hint": "2:00 PM or null"}}"""
+Output ONLY raw JSON: {{"title": "Title to remove", "time_hint": "2:00 PM or null", "date_hint": "yesterday, tomorrow, or null"}}"""
             raw_text = safe_generate_content(client, extract_prompt, fallback_text="")
             if "```" in raw_text:
                 raw_text = re.sub(r"```(json)?", "", raw_text).replace("```", "").strip()
@@ -210,9 +212,10 @@ Output ONLY raw JSON: {{"title": "Title to remove", "time_hint": "2:00 PM or nul
                 data = json.loads(json_match.group(0)) if json_match else json.loads(raw_text)
                 title = data.get("title", "").strip()
                 time_hint = data.get("time_hint")
+                date_hint = data.get("date_hint")
                 if not title and not time_hint:
                     title = re.sub(r'\b(remove|delete|cancel|clear|please|my|the)\b', '', user_message, flags=re.IGNORECASE).strip()
-                reply = gemini_calander.remove_event(title, time_hint=time_hint)
+                reply = gemini_calander.remove_event(title, time_hint=time_hint, date_hint=date_hint)
             except Exception as e:
                 print(f"[Delete intent error]: {e}")
                 reply = "Which event title or time would you like me to remove from your calendar?"
