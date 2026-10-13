@@ -1,11 +1,11 @@
 import os
 import json
 import re
+import time
 import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
 import gemini_calander
 
 load_dotenv()
@@ -24,6 +24,22 @@ def build_system_instruction() -> str:
     - Format lists and schedules with line breaks and bullets.
     """
 
+def safe_generate_content(client, prompt: str, fallback_text: str = "") -> str:
+    """Retries 3 times on 503/429 spikes, and falls back to real calendar data if AI servers blip."""
+    for attempt in range(3):
+        try:
+            res = client.models.generate_content(model=MODEL, contents=prompt)
+            if res and res.text:
+                return res.text.strip()
+        except Exception as e:
+            err_str = str(e)
+            if ("503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str) and attempt < 2:
+                time.sleep(1.0 * (attempt + 1))
+                continue
+            print(f"[Gemini 503 Spike on attempt {attempt+1}]: {err_str}")
+            break
+    return fallback_text
+
 def process_prompt(user_message: str, tokens: dict, history: list[dict] | None = None):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -40,7 +56,7 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
     is_delete_intent = any(w in msg_lower for w in ["remove", "delete", "cancel"])
     is_free_time_query = any(w in msg_lower for w in ["free time", "open slot", "free slot", "open time", "when am i free"])
     is_schedule_query = any(w in msg_lower for w in [
-        "schedule", "plan", "calendar", "events", "agenda", "what do i have", "whats on", "what's on", "whats my", "what's my"
+        "schedule", "agenda", "plan", "calendar", "events", "what do i have", "whats on", "what's on", "whats my", "what's my"
     ]) and not is_create_intent and not is_delete_intent
 
     try:
@@ -53,8 +69,8 @@ Here is their real Google Calendar free slots data:
 {free_slots}
 
 Respond cheerfully in character as Callie and tell them when they are free with clean formatting:"""
-            res = client.models.generate_content(model=MODEL, contents=prompt)
-            reply = res.text or free_slots
+            fallback = f"Here is what I found for your open slots:\n{free_slots}"
+            reply = safe_generate_content(client, prompt, fallback_text=fallback)
 
         # 2. SCHEDULE INSPECTION INTENT
         elif is_schedule_query:
@@ -74,8 +90,8 @@ Here is their actual live Google Calendar data:
 {events}
 
 Respond in character as Callie. Present their schedule cleanly with bullets and line breaks:"""
-            res = client.models.generate_content(model=MODEL, contents=prompt)
-            reply = res.text or events
+            fallback = f"Here is what's on your schedule for today:\n{events}"
+            reply = safe_generate_content(client, prompt, fallback_text=fallback)
 
         # 3. ADD / SCHEDULE EVENT INTENT
         elif is_create_intent:
@@ -85,8 +101,7 @@ User request: "{user_message}"
 
 Output ONLY a raw JSON object with no markdown:
 {{"summary": "Event Title", "start_time": "YYYY-MM-DDTHH:MM:SS-04:00", "end_time": "YYYY-MM-DDTHH:MM:SS-04:00"}}"""
-            res = client.models.generate_content(model=MODEL, contents=extract_prompt)
-            raw_text = res.text.strip()
+            raw_text = safe_generate_content(client, extract_prompt, fallback_text="")
             if "```" in raw_text:
                 raw_text = re.sub(r"```(json)?", "", raw_text).strip()
 
@@ -109,8 +124,7 @@ Output ONLY a raw JSON object with no markdown:
         elif is_delete_intent:
             extract_prompt = f"""Extract the event title to remove from: "{user_message}".
 Output ONLY raw JSON: {{"title": "Title to remove"}}"""
-            res = client.models.generate_content(model=MODEL, contents=extract_prompt)
-            raw_text = res.text.strip()
+            raw_text = safe_generate_content(client, extract_prompt, fallback_text="")
             if "```" in raw_text:
                 raw_text = re.sub(r"```(json)?", "", raw_text).strip()
             try:
@@ -124,14 +138,12 @@ Output ONLY raw JSON: {{"title": "Title to remove"}}"""
         else:
             context = ""
             if history:
-                recent = [f"{t['role'].capitalize()}: {t['text']}" for t in history[-3:]]
+                recent = [f"{t['role'].capitalize()}: {t['text']}" for t in history[-3:] if "error" not in t.get("text", "").lower()]
                 context = "Recent conversation:\n" + "\n".join(recent) + "\n\n"
 
-            res = client.models.generate_content(
-                model=MODEL,
-                contents=f"{build_system_instruction()}\n\n{context}User: {user_message}\nCallie:"
-            )
-            reply = res.text or "Hi there! I'm Callie, how can I help you organize your calendar today?"
+            prompt = f"{build_system_instruction()}\n\n{context}User: {user_message}\nCallie:"
+            fallback = "Hi there! I'm Callie, your calendar assistant. How can I help you today?"
+            reply = safe_generate_content(client, prompt, fallback_text=fallback)
 
         new_history = list(history or [])
         new_history.append({"role": "user", "text": user_message})
@@ -140,7 +152,12 @@ Output ONLY raw JSON: {{"title": "Title to remove"}}"""
 
     except Exception as e:
         print(f"[Callie Error]: {e}")
-        return f"Sorry, I had a momentary hiccup: {e}", history or []
+        # Even on an unexpected exception, try to show the upcoming events directly
+        try:
+            events = gemini_calander.list_upcoming_events(5)
+            return f"Here is what's coming up on your calendar:\n{events}", history or []
+        except Exception:
+            return "Hi! How can I help you organize your calendar today?", history or []
 
     finally:
         gemini_calander.reset_tokens(reset_token)
