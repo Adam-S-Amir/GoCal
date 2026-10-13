@@ -1,6 +1,6 @@
 """
 Google Calendar Service module for Render / Python Flask backend.
-Implements robust event operations: add, list, move (reschedule), and remove (delete).
+Implements robust event operations: add, list, move (delete + re-add), and remove (delete).
 """
 import os
 import re
@@ -50,7 +50,7 @@ def match_event_by_title(events: list, query_title: str):
         if s_clean and (s_clean in q_clean or (len(s_clean) >= 3 and q_clean in s_clean)):
             return e
 
-    # 3. Word match (ignore common stop words)
+    # 3. Word match (ignore stop words)
     stop_words = {
         'my', 'the', 'a', 'an', 'at', 'in', 'on', 'for', 'with', 'session',
         'class', 'meeting', 'event', 'lecture', 'appointment', 'to', 'from',
@@ -200,15 +200,20 @@ def remove_event(event_title: str):
     return f"All set! I've removed \"{summary}\" from your Google Calendar! 🗑️"
 
 def move_event(event_title: str, new_start_time: str, new_end_time: str = None):
-    """Reschedules an event to a new start time, preserving original duration."""
+    """
+    Moves/reschedules an event by deleting the old event and adding it at the new time.
+    Preserves summary, description, and original duration.
+    """
     service = get_service()
     match = find_event_on_calendar(event_title)
     if not match or not match.get('id'):
         return f"I couldn't find an event matching \"{event_title}\" to reschedule. Could you check the name?"
 
+    summary = match.get('summary', event_title)
+    description = match.get('description', 'Moved by Callie')
     start_dt = datetime.datetime.fromisoformat(new_start_time)
 
-    # Compute new end time to avoid Google API 400 start > end error
+    # Compute new end time to match original duration (default 1 hour)
     if new_end_time:
         end_dt = datetime.datetime.fromisoformat(new_end_time)
     else:
@@ -224,20 +229,23 @@ def move_event(event_title: str, new_start_time: str, new_end_time: str = None):
                 pass
         end_dt = start_dt + duration
 
-    patch_body = {
+    # 1. Delete original event
+    try:
+        service.events().delete(calendarId='primary', eventId=match['id']).execute()
+    except Exception as e:
+        print(f"[Warning deleting old event during move]: {e}")
+
+    # 2. Add event at new time
+    body = {
+        'summary': summary,
+        'description': description,
         'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'America/New_York'},
         'end': {'dateTime': end_dt.isoformat(), 'timeZone': 'America/New_York'},
     }
+    service.events().insert(calendarId='primary', body=body).execute()
 
-    updated = service.events().patch(
-        calendarId='primary',
-        eventId=match['id'],
-        body=patch_body
-    ).execute()
-
-    summary = updated.get('summary', match.get('summary', event_title))
     time_display = start_dt.strftime('%I:%M %p')
-    return f"Done! I've rescheduled \"{summary}\" to {time_display}! 🗓️"
+    return f"Done! I've moved \"{summary}\" to {time_display}! 🗓️"
 
 def find_free_time(duration_minutes=30, target_date="today", prefer_time_of_day="any"):
     return (
@@ -245,3 +253,8 @@ def find_free_time(duration_minutes=30, target_date="today", prefer_time_of_day=
         "02:00 PM – 03:30 PM (1.5 hours open)\n\n"
         "05:00 PM – 06:30 PM (1.5 hours open)"
     )
+
+def chat_with_callie(user_message: str, tokens: dict = None, history: list = None):
+    from ai_assistant import process_prompt
+    effective_tokens = tokens or _current_tokens
+    return process_prompt(user_message, effective_tokens, history or [])
