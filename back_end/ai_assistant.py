@@ -1,4 +1,6 @@
 import os
+import json
+import re
 import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -10,29 +12,16 @@ load_dotenv()
 
 MODEL = "gemini-3.1-flash-lite"
 
-CALENDAR_TOOLS = [
-    gemini_calander.create_calendar_event,
-    gemini_calander.list_upcoming_events,
-    gemini_calander.remove_event,
-    gemini_calander.make_time,
-    gemini_calander.due_dates,
-    gemini_calander.move_event,
-    gemini_calander.get_day_summary,
-    gemini_calander.find_free_time,
-    gemini_calander.update_event_details,
-]
-
 def build_system_instruction() -> str:
     now = datetime.datetime.now(ZoneInfo("America/New_York"))
     return f"""
-    You are Callie, a fast, cheerful calendar assistant for a student.
-    Current date & time: {now.strftime("%A, %B %d, %Y %I:%M %p")} (America/New_York).
-    Your name is Callie. Be friendly, witty, and concise.
-    
-    IMPORTANT RULES:
-    - If the user asks about their schedule, plans, or events, you MUST call list_upcoming_events or get_day_summary to inspect their Google Calendar.
-    - If the user asks to schedule, book, or move an event, you MUST call the appropriate tool.
-    - Format schedules cleanly with line breaks.
+    You are Callie, an energetic, cheerful, and witty calendar assistant for a college student.
+    Current time: {now.strftime("%A, %B %d, %Y %I:%M %p")} (America/New_York).
+    Your name is Callie.
+    Tone: Friendly, encouraging, and witty.
+    Formatting rules:
+    - Keep answers clean, concise, and easy to read.
+    - Format lists and schedules with line breaks and bullets.
     """
 
 def process_prompt(user_message: str, tokens: dict, history: list[dict] | None = None):
@@ -43,39 +32,115 @@ def process_prompt(user_message: str, tokens: dict, history: list[dict] | None =
     client = genai.Client(api_key=api_key)
     reset_token = gemini_calander.set_tokens(tokens)
 
-    prompt = user_message
-    valid_history = [
-        t for t in (history or [])
-        if "error" not in t.get("text", "").lower() and "invalid_argument" not in t.get("text", "").lower()
-    ]
-    if valid_history:
-        recent_turns = [f"{t['role'].capitalize()}: {t['text']}" for t in valid_history[-3:]]
-        if recent_turns:
-            context_str = "\n".join(recent_turns)
-            prompt = f"Previous context:\n{context_str}\n\nUser: {user_message}"
+    msg_lower = user_message.lower().strip()
+    now = datetime.datetime.now(ZoneInfo("America/New_York"))
+
+    # Intent Detection
+    is_create_intent = any(w in msg_lower for w in ["add", "create", "put", "schedule a", "book", "set an event", "set a meeting"])
+    is_delete_intent = any(w in msg_lower for w in ["remove", "delete", "cancel"])
+    is_free_time_query = any(w in msg_lower for w in ["free time", "open slot", "free slot", "open time", "when am i free"])
+    is_schedule_query = any(w in msg_lower for w in [
+        "schedule", "plan", "calendar", "events", "agenda", "what do i have", "whats on", "what's on", "whats my", "what's my"
+    ]) and not is_create_intent and not is_delete_intent
 
     try:
-        chat = client.chats.create(
-            model=MODEL,
-            config=types.GenerateContentConfig(
-                system_instruction=build_system_instruction(),
-                tools=CALENDAR_TOOLS,
-                temperature=0.1,
+        # 1. FREE TIME INTENT
+        if is_free_time_query:
+            target = "tomorrow" if "tomorrow" in msg_lower else "today"
+            free_slots = gemini_calander.find_free_time(30, target, "any")
+            prompt = f"""You are Callie. The user asked: "{user_message}".
+Here is their real Google Calendar free slots data:
+{free_slots}
+
+Respond cheerfully in character as Callie and tell them when they are free with clean formatting:"""
+            res = client.models.generate_content(model=MODEL, contents=prompt)
+            reply = res.text or free_slots
+
+        # 2. SCHEDULE INSPECTION INTENT
+        elif is_schedule_query:
+            if "tomorrow" in msg_lower:
+                tomorrow_date = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+                events = gemini_calander.get_day_summary(tomorrow_date)
+            elif "week" in msg_lower:
+                events = gemini_calander.list_upcoming_events(10)
+            else:
+                events = gemini_calander.get_day_summary("today")
+                if "nothing scheduled" in events.lower():
+                    upcoming = gemini_calander.list_upcoming_events(5)
+                    events = f"Nothing scheduled for today.\nUpcoming items:\n{upcoming}"
+
+            prompt = f"""You are Callie. The user asked: "{user_message}".
+Here is their actual live Google Calendar data:
+{events}
+
+Respond in character as Callie. Present their schedule cleanly with bullets and line breaks:"""
+            res = client.models.generate_content(model=MODEL, contents=prompt)
+            reply = res.text or events
+
+        # 3. ADD / SCHEDULE EVENT INTENT
+        elif is_create_intent:
+            extract_prompt = f"""Extract the event details from this user request.
+Current time: {now.strftime("%A, %B %d, %Y %I:%M %p")} EDT.
+User request: "{user_message}"
+
+Output ONLY a raw JSON object with no markdown:
+{{"summary": "Event Title", "start_time": "YYYY-MM-DDTHH:MM:SS-04:00", "end_time": "YYYY-MM-DDTHH:MM:SS-04:00"}}"""
+            res = client.models.generate_content(model=MODEL, contents=extract_prompt)
+            raw_text = res.text.strip()
+            if "```" in raw_text:
+                raw_text = re.sub(r"```(json)?", "", raw_text).strip()
+
+            try:
+                event_data = json.loads(raw_text)
+                summary = event_data.get("summary", "New Event")
+                start_time = event_data.get("start_time")
+                end_time = event_data.get("end_time")
+                if not end_time and start_time:
+                    st = datetime.datetime.fromisoformat(start_time)
+                    end_time = (st + datetime.timedelta(hours=1)).isoformat()
+
+                gemini_calander.create_calendar_event(summary, start_time, end_time, "Created by Callie")
+                st_formatted = datetime.datetime.fromisoformat(start_time).strftime("%I:%M %p")
+                reply = f"All set! I've added '{summary}' for {st_formatted} to your Google Calendar! 🗓️"
+            except Exception:
+                reply = "I'm ready to schedule that! Could you confirm the exact start time and day?"
+
+        # 4. REMOVE / CANCEL EVENT INTENT
+        elif is_delete_intent:
+            extract_prompt = f"""Extract the event title to remove from: "{user_message}".
+Output ONLY raw JSON: {{"title": "Title to remove"}}"""
+            res = client.models.generate_content(model=MODEL, contents=extract_prompt)
+            raw_text = res.text.strip()
+            if "```" in raw_text:
+                raw_text = re.sub(r"```(json)?", "", raw_text).strip()
+            try:
+                data = json.loads(raw_text)
+                title = data.get("title", "")
+                reply = gemini_calander.remove_event(title)
+            except Exception:
+                reply = "Which event title would you like me to remove from your calendar?"
+
+        # 5. GENERAL CONVERSATION & GREETINGS ("hi", "how are you", chat)
+        else:
+            context = ""
+            if history:
+                recent = [f"{t['role'].capitalize()}: {t['text']}" for t in history[-3:]]
+                context = "Recent conversation:\n" + "\n".join(recent) + "\n\n"
+
+            res = client.models.generate_content(
+                model=MODEL,
+                contents=f"{build_system_instruction()}\n\n{context}User: {user_message}\nCallie:"
             )
-        )
+            reply = res.text or "Hi there! I'm Callie, how can I help you organize your calendar today?"
 
-        response = chat.send_message(prompt)
-        reply = response.text or "I've checked and updated your calendar!"
-
-        new_history = list(valid_history)
+        new_history = list(history or [])
         new_history.append({"role": "user", "text": user_message})
         new_history.append({"role": "model", "text": reply})
         return reply, new_history
 
     except Exception as e:
-        print(f"[Gemini Error]: {e}")
-        error_msg = f"Sorry, I had trouble with that request: {e}"
-        return error_msg, valid_history
+        print(f"[Callie Error]: {e}")
+        return f"Sorry, I had a momentary hiccup: {e}", history or []
 
     finally:
         gemini_calander.reset_tokens(reset_token)
