@@ -3,7 +3,7 @@
 .env.local
 *.env
 README.md
-
+node_modules/
 # Python cache & virtual environments
 __pycache__/
 *.pyc
