@@ -232,7 +232,14 @@ function FormattedMessage({ text, isAi }: { text: string; isAi: boolean }) {
 }
 
 export default function App() {
-  const [currentScreen, setCurrentScreen] = useState<'home' | 'chat'>('home');
+  const [currentScreen, setCurrentScreen] = useState<'home' | 'chat' | 'privacy' | 'terms'>(() => {
+    if (typeof window !== 'undefined') {
+      const path = window.location.pathname.toLowerCase();
+      if (path.includes('privacy')) return 'privacy';
+      if (path.includes('terms')) return 'terms';
+    }
+    return 'home';
+  });
   const [messages, setMessages] = useState<Message[]>([
     {
       sender: 'ai',
@@ -251,6 +258,8 @@ export default function App() {
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [copiedTab, setCopiedTab] = useState<string | null>(null);
   const [activeCodeTab, setActiveCodeTab] = useState<'app' | 'google' | 'requirements' | 'ai_assistant'>('app');
+  const [showPrivacyModal, setShowPrivacyModal] = useState(false);
+  const [showTermsModal, setShowTermsModal] = useState(false);
 
   // Preferences form state
   const [preferences, setPreferences] = useState({
@@ -296,7 +305,28 @@ export default function App() {
     }
 
     fetchAuthStatus();
+
+    const handlePopState = () => {
+      const path = window.location.pathname.toLowerCase();
+      if (path.includes('privacy')) setCurrentScreen('privacy');
+      else if (path.includes('terms')) setCurrentScreen('terms');
+      else setCurrentScreen('home');
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  const navigateTo = (screen: 'home' | 'chat' | 'privacy' | 'terms') => {
+    if (screen === 'home') {
+      window.history.pushState({}, '', '/');
+    } else if (screen === 'privacy') {
+      window.history.pushState({}, '', '/privacy');
+    } else if (screen === 'terms') {
+      window.history.pushState({}, '', '/terms');
+    }
+    setCurrentScreen(screen);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   // Fetch current auth status
   const fetchAuthStatus = async () => {
@@ -536,62 +566,108 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from werkzeug.middleware.proxy_fix import ProxyFix
 from google_service import get_oauth_flow
-from calendar_controller import list_upcoming_events
+from gemini_calander import list_upcoming_events
 from ai_assistant import process_prompt
 
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = os.getenv("SESSION_SECRET", "dev_secret_key_123")
+app.secret_key = os.getenv("SESSION_SECRET", "super_secret_dev_key_change_in_production")
 
-# 1. Reverse proxy fix: Essential for Render HTTPS termination
+# Reverse proxy fix: Essential for Render HTTPS termination
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
 
-# 2. Fix cookie dropping on cross-site Google redirect
+# Cookie configuration for cross-site Google OAuth
 app.config.update(
     SESSION_COOKIE_SAMESITE="None",
     SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_HTTPONLY=True,
 )
 
-CORS(app, supports_credentials=True, origins=os.getenv("ALLOWED_ORIGINS", "*").split(","))
+default_origins = "https://gocal.us,http://localhost:3000,http://localhost:5173"
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", default_origins).split(",")
+    if origin.strip()
+]
+CORS(app, supports_credentials=True, origins=allowed_origins if allowed_origins else "*")
 
-def get_redirect_uri():
+def get_effective_redirect_uri():
     configured = os.getenv("GOOGLE_REDIRECT_URI")
     if configured and configured.startswith("http"):
         return configured
     scheme = request.headers.get('X-Forwarded-Proto', request.scheme)
     return f"{scheme}://{request.host}/api/auth/callback"
 
+def get_frontend_target():
+    target = session.pop('redirect_to', None) or os.getenv("FRONTEND_URL", "https://gocal.us")
+    if target and not (target.startswith("http://") or target.startswith("https://") or target.startswith("/")):
+        target = f"https://{target}"
+    return target
+
+@app.route('/')
+def home():
+    if 'tokens' in session:
+        return redirect(f"{get_frontend_target()}?auth=success")
+    return redirect(get_frontend_target())
+
 @app.route('/login')
 def login():
-    flow = get_oauth_flow(redirect_uri=get_redirect_uri())
+    redirect_to = request.args.get('redirect_to')
+    if redirect_to:
+        session['redirect_to'] = redirect_to
+    elif request.referrer and 'google.com' not in request.referrer:
+        session['redirect_to'] = request.referrer
+
+    flow = get_oauth_flow(redirect_uri=get_effective_redirect_uri())
     auth_url, state = flow.authorization_url(access_type='offline', prompt='consent', include_granted_scopes='true')
     session['state'] = state
     if flow.code_verifier:
         session['code_verifier'] = flow.code_verifier
     return redirect(auth_url)
 
+@app.route('/api/auth/url')
+def auth_url():
+    redirect_uri = get_effective_redirect_uri()
+    flow = get_oauth_flow(redirect_uri=redirect_uri)
+    url, state = flow.authorization_url(access_type='offline', prompt='consent', include_granted_scopes='true')
+    session['state'] = state
+    if flow.code_verifier:
+        session['code_verifier'] = flow.code_verifier
+    return jsonify({'authUrl': url, 'redirectUri': redirect_uri})
+
 @app.route('/api/auth/callback')
 def callback():
     state = session.get('state')
-    url = request.url
-    # Force https scheme if proxied
-    if request.headers.get('X-Forwarded-Proto') == 'https' and url.startswith('http://'):
-        url = url.replace('http://', 'https://', 1)
+    redirect_uri = get_effective_redirect_uri()
+    auth_response_url = request.url
+    if request.headers.get('X-Forwarded-Proto') == 'https' and auth_response_url.startswith('http://'):
+        auth_response_url = auth_response_url.replace('http://', 'https://', 1)
         
-    flow = get_oauth_flow(state=state, redirect_uri=get_redirect_uri())
-    if session.get('code_verifier'):
-        flow.code_verifier = session.get('code_verifier')
-    flow.fetch_token(authorization_response=url)
-    
-    creds = flow.credentials
-    session['tokens'] = {
-        'access_token': creds.token,
-        'refresh_token': creds.refresh_token or session.get('tokens', {}).get('refresh_token'),
-    }
-    frontend_url = os.getenv("FRONTEND_URL", "/")
-    return redirect(f"{frontend_url}?auth=success")`,
+    try:
+        flow = get_oauth_flow(state=state, redirect_uri=redirect_uri)
+        if session.get('code_verifier'):
+            flow.code_verifier = session.get('code_verifier')
+        flow.fetch_token(authorization_response=auth_response_url)
+        
+        creds = flow.credentials
+        session['tokens'] = {
+            'access_token': creds.token,
+            'refresh_token': creds.refresh_token or session.get('tokens', {}).get('refresh_token'),
+        }
+        target_url = get_frontend_target()
+        separator = "&" if "?" in target_url else "?"
+        return redirect(f"{target_url}{separator}auth=success")
+    except Exception as e:
+        target_url = get_frontend_target()
+        separator = "&" if "?" in target_url else "?"
+        return redirect(f"{target_url}{separator}auth=error&error_details={str(e)}")
+
+@app.errorhandler(404)
+def handle_404(e):
+    if 'gocal.us' in request.path:
+        return redirect('https://gocal.us?auth=success')
+    return jsonify({'error': 'Not found', 'path': request.path}), 404`,
 
     google: `import os
 from google_auth_oauthlib.flow import Flow
@@ -1060,6 +1136,24 @@ Output ONLY raw JSON: {{"title": "Title to remove"}}"""
                       >
                         ⚡ Or launch immediately in Instant Sandbox Mode
                       </button>
+
+                      <div className="flex items-center justify-center gap-2 text-[11px] text-gray-400 mt-1">
+                        <button
+                          type="button"
+                          onClick={() => navigateTo('privacy')}
+                          className="hover:text-[#1d3557] underline cursor-pointer"
+                        >
+                          Privacy Policy
+                        </button>
+                        <span>•</span>
+                        <button
+                          type="button"
+                          onClick={() => navigateTo('terms')}
+                          className="hover:text-[#1d3557] underline cursor-pointer"
+                        >
+                          Terms of Service
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1192,6 +1286,18 @@ Output ONLY raw JSON: {{"title": "Title to remove"}}"""
                 Home
               </a>
               <button
+                onClick={() => navigateTo('privacy')}
+                className="text-gray-400 hover:text-gray-600 text-sm bg-transparent border-0 cursor-pointer"
+              >
+                Privacy Policy
+              </button>
+              <button
+                onClick={() => navigateTo('terms')}
+                className="text-gray-400 hover:text-gray-600 text-sm bg-transparent border-0 cursor-pointer"
+              >
+                Terms of Service
+              </button>
+              <button
                 onClick={() => setShowDiagnostics(true)}
                 className="text-gray-400 hover:text-gray-600 text-sm bg-transparent border-0 cursor-pointer"
               >
@@ -1200,6 +1306,169 @@ Output ONLY raw JSON: {{"title": "Title to remove"}}"""
               <a href="https://github.com/Adam-S-Amir/GoCal" target="_blank" rel="noreferrer">
                 GitHub Repository
               </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DEDICATED FULL-PAGE PRIVACY POLICY SCREEN (for https://gocal.us/privacy) */}
+      {currentScreen === 'privacy' && (
+        <div className="min-h-screen bg-slate-50 py-10 px-4 flex justify-center">
+          <div className="max-w-2xl w-full bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-10 space-y-6">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-5">
+              <div className="flex items-center gap-3">
+                <img src="/GoCal-Logo.png" alt="Logo" className="w-9 h-9 object-contain" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                <span className="text-2xl font-black text-[#1d3557]">GoCal</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigateTo('home')}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-[#1d3557] bg-slate-100 hover:bg-slate-200 transition"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Back to GoCal</span>
+              </button>
+            </div>
+
+            <div>
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-[#1d3557] mb-1">Privacy Policy</h1>
+              <p className="text-xs text-slate-400 font-medium">Last updated: October 13, 2026</p>
+            </div>
+
+            <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs sm:text-sm leading-relaxed">
+              <strong>Plain English Summary:</strong> GoCal and its AI scheduling companion Callie only access your Google Calendar to fulfill the direct scheduling requests you ask for (like checking your schedule, moving a class, or adding a study session). We never sell your data, never share it with advertisers, and you can revoke access at any time.
+            </div>
+
+            <div className="space-y-4 text-xs sm:text-sm text-slate-600 leading-relaxed">
+              <div>
+                <h2 className="text-base font-bold text-slate-900 mb-1">1. Overview</h2>
+                <p>
+                  GoCal is an intelligent calendar assistant powered by conversational AI. We respect your privacy and are committed to protecting any information processed while using our service.
+                </p>
+              </div>
+
+              <div>
+                <h2 className="text-base font-bold text-slate-900 mb-1">2. Google User Data We Access</h2>
+                <p className="mb-2">
+                  When you sign in using Google OAuth, GoCal requests access to the Google Calendar API (<code>https://www.googleapis.com/auth/calendar</code>). We access:
+                </p>
+                <ul className="list-disc list-inside space-y-1 text-slate-700 pl-2">
+                  <li><strong>Calendar Events:</strong> Titles, dates, start/end times, and descriptions so Callie can read your daily schedule and find open gaps.</li>
+                  <li><strong>Basic Profile Info:</strong> Your Google email and name to verify your user session.</li>
+                </ul>
+              </div>
+
+              <div>
+                <h2 className="text-base font-bold text-slate-900 mb-1">3. How Your Data Is Used</h2>
+                <p>
+                  Your calendar data is used strictly to fulfill direct scheduling features you request:
+                </p>
+                <ul className="list-disc list-inside space-y-1 text-slate-700 pl-2 mt-1">
+                  <li>Displaying your upcoming schedule and agenda.</li>
+                  <li>Adding, rescheduling, and removing events based on your natural language commands.</li>
+                  <li>Analyzing open gaps between commitments to help you plan free time and socialize.</li>
+                </ul>
+              </div>
+
+              <div>
+                <h2 className="text-base font-bold text-slate-900 mb-1">4. Data Sharing & Security</h2>
+                <p>
+                  <strong>We do not sell, rent, or trade your Google Calendar data to any third parties.</strong> Authentication tokens are stored securely in encrypted HTTP-only session cookies and transmitted strictly over HTTPS. We do not use your private calendar events to train public models.
+                </p>
+              </div>
+
+              <div>
+                <h2 className="text-base font-bold text-slate-900 mb-1">5. Revoking Access</h2>
+                <p>
+                  You can disconnect GoCal at any time by signing out or by visiting your{' '}
+                  <a
+                    href="https://myaccount.google.com/permissions"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-emerald-700 font-semibold underline inline-flex items-center gap-0.5"
+                  >
+                    Google Account Security &amp; Permissions <ExternalLink className="w-3 h-3" />
+                  </a>.
+                </p>
+              </div>
+            </div>
+
+            <div className="pt-6 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
+              <span>&copy; 2026 GoCal. All rights reserved.</span>
+              <button onClick={() => navigateTo('terms')} className="text-slate-600 hover:text-slate-900 underline">
+                Terms of Service
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DEDICATED FULL-PAGE TERMS OF SERVICE SCREEN (for https://gocal.us/terms) */}
+      {currentScreen === 'terms' && (
+        <div className="min-h-screen bg-slate-50 py-10 px-4 flex justify-center">
+          <div className="max-w-2xl w-full bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-10 space-y-6">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-5">
+              <div className="flex items-center gap-3">
+                <img src="/GoCal-Logo.png" alt="Logo" className="w-9 h-9 object-contain" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                <span className="text-2xl font-black text-[#1d3557]">GoCal</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigateTo('home')}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-[#1d3557] bg-slate-100 hover:bg-slate-200 transition"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Back to GoCal</span>
+              </button>
+            </div>
+
+            <div>
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-[#1d3557] mb-1">Terms of Service</h1>
+              <p className="text-xs text-slate-400 font-medium">Last updated: October 13, 2026</p>
+            </div>
+
+            <div className="space-y-4 text-xs sm:text-sm text-slate-600 leading-relaxed">
+              <div>
+                <h2 className="text-base font-bold text-slate-900 mb-1">1. Acceptance of Terms</h2>
+                <p>
+                  By accessing GoCal and using Callie (&quot;the Service&quot;), you agree to be bound by these Terms of Service. If you do not agree to these terms, please discontinue use.
+                </p>
+              </div>
+
+              <div>
+                <h2 className="text-base font-bold text-slate-900 mb-1">2. Description of Service</h2>
+                <p>
+                  GoCal provides conversational calendar assistance using artificial intelligence. The service connects with your Google Calendar account via standard Google OAuth 2.0 to manage events and schedules.
+                </p>
+              </div>
+
+              <div>
+                <h2 className="text-base font-bold text-slate-900 mb-1">3. User Responsibilities</h2>
+                <p>
+                  You are responsible for reviewing and confirming calendar events, appointments, and reschedules made through the application. While Callie strives for high precision, you are responsible for maintaining your commitments.
+                </p>
+              </div>
+
+              <div>
+                <h2 className="text-base font-bold text-slate-900 mb-1">4. AI &amp; Accuracy Disclaimers</h2>
+                <p>
+                  The service is provided on an &quot;AS IS&quot; and &quot;AS AVAILABLE&quot; basis without warranties of any kind. The developers are not liable for missed meetings, scheduling conflicts, or external Google service disruptions.
+                </p>
+              </div>
+
+              <div>
+                <h2 className="text-base font-bold text-slate-900 mb-1">5. Termination</h2>
+                <p>
+                  You may stop using GoCal at any time by disconnecting your Google account or revoking permissions in your Google Account settings.
+                </p>
+              </div>
+            </div>
+
+            <div className="pt-6 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
+              <span>&copy; 2026 GoCal. All rights reserved.</span>
+              <button onClick={() => navigateTo('privacy')} className="text-slate-600 hover:text-slate-900 underline">
+                Privacy Policy
+              </button>
             </div>
           </div>
         </div>
@@ -1624,6 +1893,134 @@ Output ONLY raw JSON: {{"title": "Title to remove"}}"""
                 className="px-5 py-2 rounded-xl bg-[#1d3557] text-white text-xs font-semibold hover:bg-[#162740] transition"
               >
                 Close Guide
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* PRIVACY POLICY MODAL */}
+      {showPrivacyModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-lg w-full max-h-[85vh] flex flex-col shadow-2xl border border-gray-100 animate-in fade-in zoom-in-95 duration-150">
+            <div className="p-5 border-b border-gray-100 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <ShieldCheck className="w-5 h-5 text-emerald-600" />
+                <h3 className="font-bold text-gray-900 text-base">Privacy Policy</h3>
+              </div>
+              <button
+                onClick={() => setShowPrivacyModal(false)}
+                className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-4 text-xs text-gray-600 leading-relaxed">
+              <p className="text-gray-400 font-medium">Last updated: October 2026</p>
+              
+              <div>
+                <h4 className="font-bold text-gray-900 text-sm mb-1">1. Overview</h4>
+                <p>
+                  Callie (&quot;we&quot;, &quot;our&quot;, or &quot;the service&quot;) is an AI-powered calendar companion built to help students and busy individuals organize their daily schedules and find open windows for productivity and relaxation.
+                </p>
+              </div>
+
+              <div>
+                <h4 className="font-bold text-gray-900 text-sm mb-1">2. Google User Data & Calendar Access</h4>
+                <p className="mb-1.5">
+                  When you connect your Google Account, Callie requests access to Google Calendar API data solely to fulfill your direct conversational commands:
+                </p>
+                <ul className="list-disc list-inside space-y-1 text-gray-700">
+                  <li>Displaying your agenda when you ask what is on your schedule.</li>
+                  <li>Adding, rescheduling, or deleting events when you explicitly request it.</li>
+                  <li>Analyzing open gaps between events to suggest free time and break windows.</li>
+                </ul>
+              </div>
+
+              <div>
+                <h4 className="font-bold text-gray-900 text-sm mb-1">3. Data Sharing & Security</h4>
+                <p>
+                  We <strong>never sell, rent, or trade</strong> your Google Calendar data to any advertisers or third parties. Authentication tokens are stored in secure HTTP-only cookies and are never shared.
+                </p>
+              </div>
+
+              <div>
+                <h4 className="font-bold text-gray-900 text-sm mb-1">4. Revoking Permissions</h4>
+                <p>
+                  You can disconnect Callie or revoke access at any time directly through your{' '}
+                  <a
+                    href="https://myaccount.google.com/permissions"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-emerald-700 font-semibold underline inline-flex items-center gap-0.5"
+                  >
+                    Google Account Permissions <ExternalLink className="w-3 h-3" />
+                  </a>.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-4 bg-gray-50 border-t border-gray-100 flex justify-end">
+              <button
+                onClick={() => setShowPrivacyModal(false)}
+                className="px-5 py-2 rounded-xl bg-[#1d3557] text-white text-xs font-semibold hover:bg-[#162740] transition"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TERMS OF SERVICE MODAL */}
+      {showTermsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-lg w-full max-h-[85vh] flex flex-col shadow-2xl border border-gray-100 animate-in fade-in zoom-in-95 duration-150">
+            <div className="p-5 border-b border-gray-100 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <Info className="w-5 h-5 text-blue-600" />
+                <h3 className="font-bold text-gray-900 text-base">Terms of Service</h3>
+              </div>
+              <button
+                onClick={() => setShowTermsModal(false)}
+                className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-4 text-xs text-gray-600 leading-relaxed">
+              <p className="text-gray-400 font-medium">Last updated: October 2026</p>
+
+              <div>
+                <h4 className="font-bold text-gray-900 text-sm mb-1">1. Acceptance of Terms</h4>
+                <p>
+                  By accessing or using Callie Calendar Assistant, you agree to these Terms of Service. If you do not agree, please do not connect your Google account.
+                </p>
+              </div>
+
+              <div>
+                <h4 className="font-bold text-gray-900 text-sm mb-1">2. Permitted Use</h4>
+                <p>
+                  Callie is provided for personal scheduling and agenda management. You are responsible for reviewing scheduled appointments and verifying that moved or created events reflect your desired timings.
+                </p>
+              </div>
+
+              <div>
+                <h4 className="font-bold text-gray-900 text-sm mb-1">3. Disclaimers</h4>
+                <p>
+                  The service is provided &quot;as is&quot; without warranties of any kind. While Callie strives for high accuracy, the developers are not liable for missed appointments or scheduling discrepancies.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-4 bg-gray-50 border-t border-gray-100 flex justify-end">
+              <button
+                onClick={() => setShowTermsModal(false)}
+                className="px-5 py-2 rounded-xl bg-[#1d3557] text-white text-xs font-semibold hover:bg-[#162740] transition"
+              >
+                Close
               </button>
             </div>
           </div>
