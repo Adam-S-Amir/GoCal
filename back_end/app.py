@@ -1,5 +1,9 @@
 import os
+import json
+import uuid
+import tempfile
 from flask import Flask, redirect, request, session, jsonify
+from flask.sessions import SessionInterface, SessionMixin
 from flask_cors import CORS
 from dotenv import load_dotenv
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -9,16 +13,88 @@ from ai_assistant import process_prompt
 
 load_dotenv()
 
+# ==============================================================================
+# SERVER-SIDE SESSION ENGINE (FIXES 4096-BYTE COOKIE OVERFLOW & CSRF MISMATCH)
+# ==============================================================================
+# Browser cookies have a strict 4093-byte limit. Tokens, code verifiers, and
+# chat history exceed 4KB, causing Chrome/Opera/Safari to drop the cookie.
+# This server session interface stores data in /tmp/flask_sessions and sets only
+# a tiny 36-byte UUID cookie in the browser, permanently eliminating dropped cookies.
+class SimpleServerSession(dict, SessionMixin):
+    def __init__(self, initial=None, sid=None):
+        super().__init__(initial or {})
+        self.sid = sid
+        self.modified = False
+
+class ServerSessionInterface(SessionInterface):
+    def __init__(self, storage_dir=None):
+        self.storage_dir = storage_dir or os.path.join(tempfile.gettempdir(), 'flask_sessions')
+        os.makedirs(self.storage_dir, exist_ok=True)
+
+    def open_session(self, app, request):
+        cookie_name = app.config.get("SESSION_COOKIE_NAME", "session")
+        sid = request.cookies.get(cookie_name)
+        if not sid:
+            sid = str(uuid.uuid4())
+            return SimpleServerSession(sid=sid)
+        filepath = os.path.join(self.storage_dir, sid)
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return SimpleServerSession(data, sid=sid)
+            except Exception:
+                pass
+        return SimpleServerSession(sid=sid)
+
+    def save_session(self, app, session, response):
+        cookie_name = app.config.get("SESSION_COOKIE_NAME", "session")
+        
+        # Share cookie between api.gocal.us and gocal.us
+        host = request.host.split(":")[0].lower()
+        if host.endswith("gocal.us"):
+            domain = ".gocal.us"
+        else:
+            domain = self.get_cookie_domain(app)
+        path = self.get_cookie_path(app)
+
+        if not session:
+            filepath = os.path.join(self.storage_dir, session.sid)
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except Exception:
+                    pass
+            if session.modified:
+                response.delete_cookie(cookie_name, domain=domain, path=path)
+            return
+
+        filepath = os.path.join(self.storage_dir, session.sid)
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(dict(session), f)
+        except Exception as e:
+            print(f"[Session Save Error]: {e}")
+
+        response.set_cookie(
+            cookie_name,
+            session.sid,
+            max_age=30 * 86400,
+            httponly=True,
+            domain=domain,
+            path=path,
+            secure=True,
+            samesite="None"
+        )
+
 app = Flask(__name__)
 app.secret_key = os.getenv("SESSION_SECRET", "super_secret_dev_key_change_in_production")
+app.session_interface = ServerSessionInterface()
 
-# Fix reverse proxy headers (CRITICAL on Render, Cloud Run, Heroku)
-# This ensures request.scheme and request.url accurately reflect https://
+# Reverse proxy fix: Essential for Render HTTPS termination
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
 
-# CRITICAL FOR CLOUD / RENDER AUTH:
-# When Google redirects back cross-site from accounts.google.com,
-# SameSite must be 'None' and Secure must be True so cookies are NOT dropped.
+# Cookie configuration for cross-site Google OAuth
 app.config.update(
     SESSION_COOKIE_SAMESITE="None",
     SESSION_COOKIE_SECURE=True,
@@ -30,7 +106,7 @@ if os.getenv("FLASK_ENV") == "development" or os.getenv("LOCAL_DEV") == "1":
     os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 # Enable CORS for frontend clients
-default_origins = "https://gocal.us,http://localhost:3000,http://localhost:5173"
+default_origins = "https://gocal.us,https://www.gocal.us,https://api.gocal.us,https://gocal-front.onrender.com,http://localhost:3000,http://localhost:5173"
 allowed_origins = [
     origin.strip()
     for origin in os.getenv("ALLOWED_ORIGINS", default_origins).split(",")
@@ -59,15 +135,13 @@ def home():
 
 @app.route('/login')
 def login():
-    # Save the return destination passed by frontend (e.g. /login?redirect_to=https://gocal.us)
     redirect_to = request.args.get('redirect_to')
     if redirect_to:
         session['redirect_to'] = redirect_to
     elif request.referrer and 'google.com' not in request.referrer:
         session['redirect_to'] = request.referrer
 
-    redirect_uri = get_effective_redirect_uri()
-    flow = get_oauth_flow(redirect_uri=redirect_uri)
+    flow = get_oauth_flow(redirect_uri=get_effective_redirect_uri())
     auth_url, state = flow.authorization_url(
         access_type='offline',
         prompt='consent',
@@ -97,16 +171,17 @@ def auth_url():
 
 @app.route('/api/auth/callback')
 def callback():
-    state = session.get('state')
+    state_in_session = session.get('state')
+    state_in_req = request.args.get('state')
+    effective_state = state_in_session or state_in_req
     redirect_uri = get_effective_redirect_uri()
 
-    # Reconstruct request URL with https if terminated by reverse proxy
     auth_response_url = request.url
     if request.headers.get('X-Forwarded-Proto') == 'https' and auth_response_url.startswith('http://'):
         auth_response_url = auth_response_url.replace('http://', 'https://', 1)
 
     try:
-        flow = get_oauth_flow(state=state, redirect_uri=redirect_uri)
+        flow = get_oauth_flow(state=effective_state, redirect_uri=redirect_uri)
         if session.get('code_verifier'):
             flow.code_verifier = session.get('code_verifier')
 
@@ -129,6 +204,14 @@ def callback():
         target_url = get_frontend_target()
         separator = "&" if "?" in target_url else "?"
         return redirect(f"{target_url}{separator}auth=error&error_details={str(e)}")
+
+@app.route('/privacy')
+def privacy_page():
+    return redirect('https://gocal.us/privacy')
+
+@app.route('/terms')
+def terms_page():
+    return redirect('https://gocal.us/terms')
 
 @app.errorhandler(404)
 def handle_404(e):
@@ -160,7 +243,14 @@ def healthz():
 def api_index():
     return jsonify({
         'message': 'GoCal Backend API is running',
-        'endpoints': ['/api/auth/status', '/api/auth/url', '/api/auth/callback', '/api/events', '/api/chat', '/api/preferences']
+        'endpoints': [
+            '/api/auth/status',
+            '/api/auth/url',
+            '/api/auth/callback',
+            '/api/events',
+            '/api/chat',
+            '/api/preferences'
+        ]
     })
 
 @app.route('/events')
@@ -168,7 +258,6 @@ def api_index():
 def get_events():
     if 'tokens' not in session:
         return jsonify({'error': 'Not authenticated. Visit /login first.'}), 401
-
     try:
         events = list_upcoming_events(session['tokens'])
         return jsonify(events)
@@ -193,10 +282,11 @@ def chat():
         return jsonify({'error': 'Missing "message" in request payload'}), 400
 
     user_message = data['message']
-
     try:
         history = session.get('chat_history', [])
         ai_response, history = process_prompt(user_message, session['tokens'], history)
+        if len(history) > 24:
+            history = history[-24:]
         session['chat_history'] = history
         return jsonify({'reply': ai_response})
     except Exception as e:
@@ -207,50 +297,6 @@ def reset_chat():
     session.pop('chat_history', None)
     return jsonify({'ok': True})
 
-@app.route('/privacy')
-def privacy_policy():
-    return """<!DOCTYPE html>
-<html>
-<head><title>Privacy Policy - Callie Calendar Assistant</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>body{font-family:system-ui,-apple-system,sans-serif;max-width:700px;margin:40px auto;padding:0 20px;line-height:1.6;color:#222}h1,h2{color:#111}</style></head>
-<body>
-<h1>Privacy Policy</h1>
-<p>Last updated: October 2026</p>
-<h2>1. Overview</h2>
-<p>Callie ("we", "our", or "the application") is an AI calendar assistant designed to help college students and busy individuals manage their daily schedules.</p>
-<h2>2. Google User Data</h2>
-<p>Callie requests access to Google Calendar API data (events and calendar read/write) solely to:</p>
-<ul>
-<li>Display your upcoming events when you ask for your schedule.</li>
-<li>Add, move, reschedule, or remove events based on your direct conversational requests.</li>
-<li>Analyze open time windows to suggest downtime and study sessions.</li>
-</ul>
-<h2>3. Data Protection and Sharing</h2>
-<p>We do not sell, rent, or trade your Google Calendar data to any third parties. Your calendar tokens and data are used strictly to fulfill your direct assistant commands.</p>
-<h2>4. Revoking Access</h2>
-<p>You can revoke Callie's access to your Google Account at any time in your <a href="https://myaccount.google.com/permissions" target="_blank">Google Account Permissions</a>.</p>
-<h2>5. Contact</h2>
-<p>For questions or privacy inquiries, contact the developer via GitHub or email.</p>
-</body>
-</html>"""
-
-@app.route('/terms')
-def terms_of_service():
-    return """<!DOCTYPE html>
-<html>
-<head><title>Terms of Service - Callie Calendar Assistant</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>body{font-family:system-ui,-apple-system,sans-serif;max-width:700px;margin:40px auto;padding:0 20px;line-height:1.6;color:#222}h1,h2{color:#111}</style></head>
-<body>
-<h1>Terms of Service</h1>
-<p>Last updated: October 2026</p>
-<h2>1. Acceptance of Terms</h2>
-<p>By signing in and using Callie Calendar Assistant, you agree to these Terms of Service.</p>
-<h2>2. Use of Service</h2>
-<p>Callie is provided to help you organize personal calendar events. You are responsible for ensuring the accuracy of your scheduled appointments and meetings.</p>
-<h2>3. Disclaimer</h2>
-<p>The application is provided "as is" without warranty of any kind. We are not liable for missed meetings, scheduling conflicts, or external calendar service disruptions.</p>
-</body>
-</html>"""
-
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
-
