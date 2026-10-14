@@ -1010,6 +1010,21 @@ Output ONLY raw JSON: {{"title": "Title to remove"}}"""
               <div className="flex items-center gap-3">
                 <button
                   type="button"
+                  onClick={() => navigateTo('privacy')}
+                  className="hidden md:inline-block text-xs font-semibold text-gray-500 hover:text-[#1d3557] transition"
+                >
+                  Privacy Policy
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateTo('terms')}
+                  className="hidden md:inline-block text-xs font-semibold text-gray-500 hover:text-[#1d3557] transition"
+                >
+                  Terms of Service
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setShowDiagnostics(true)}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition shadow-sm"
                 >
@@ -1161,8 +1176,84 @@ Output ONLY raw JSON: {{"title": "Title to remove"}}"""
             </div>
 
             <p className="scroll-down-hint mb-4 cursor-pointer" onClick={scrollToPreferences}>
-              Scroll down for Preferences &darr;
+              Scroll down to explore features &amp; preferences &darr;
             </p>
+          </div>
+
+          {/* PUBLIC ABOUT GOCAL & GOOGLE CALENDAR PURPOSE SECTION (Google OAuth Compliance) */}
+          <div className="w-full max-w-4xl mx-auto px-6 py-12 space-y-10">
+            <div className="text-center max-w-2xl mx-auto space-y-3">
+              <span className="px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800">
+                Application Purpose &amp; Integration
+              </span>
+              <h2 className="text-3xl font-extrabold text-[#1d3557]">
+                How GoCal Enhances Your Google Calendar
+              </h2>
+              <p className="text-sm text-gray-600 leading-relaxed">
+                GoCal is an artificial intelligence-assisted scheduling companion featuring Callie. We integrate directly with your Google Calendar through official Google OAuth 2.0 to make managing academic, personal, and social commitments effortless.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-sm space-y-3">
+                <div className="w-10 h-10 rounded-xl bg-blue-50 text-[#1d3557] flex items-center justify-center font-bold">
+                  <CalendarDays className="w-5 h-5 text-[#457b9d]" />
+                </div>
+                <h3 className="font-bold text-base text-[#1d3557]">1. Real-Time Agenda Overview</h3>
+                <p className="text-xs text-gray-600 leading-relaxed">
+                  Callie reads your Google Calendar events to display clean, vertically spaced daily and weekly overviews when you ask &quot;what&apos;s my schedule?&quot; without any cluttered text clumps.
+                </p>
+              </div>
+
+              <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-sm space-y-3">
+                <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-800 flex items-center justify-center font-bold">
+                  <RefreshCw className="w-5 h-5 text-emerald-600" />
+                </div>
+                <h3 className="font-bold text-base text-[#1d3557]">2. Natural Rescheduling</h3>
+                <p className="text-xs text-gray-600 leading-relaxed">
+                  Easily update appointments hands-free (e.g. &quot;move Spanish to 8pm&quot; or &quot;cancel gym&quot;). Callie locates the matching event, deletes the old slot, and inserts it at your new target time.
+                </p>
+              </div>
+
+              <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-sm space-y-3">
+                <div className="w-10 h-10 rounded-xl bg-purple-50 text-purple-800 flex items-center justify-center font-bold">
+                  <Sparkles className="w-5 h-5 text-purple-600" />
+                </div>
+                <h3 className="font-bold text-base text-[#1d3557]">3. Smart Downtime Discovery</h3>
+                <p className="text-xs text-gray-600 leading-relaxed">
+                  Ask Callie &quot;when this week is a good time to see my friends?&quot; and she analyzes the actual open gaps between your lectures and commitments to find optimal windows to relax.
+                </p>
+              </div>
+            </div>
+
+            {/* Privacy & Trust Assurance Box */}
+            <div className="p-6 rounded-2xl bg-emerald-50/70 border border-emerald-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div className="space-y-1 max-w-xl">
+                <div className="flex items-center gap-2 text-emerald-900 font-bold text-sm">
+                  <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0" />
+                  <span>Privacy-First &amp; Never Sold</span>
+                </div>
+                <p className="text-xs text-emerald-800 leading-relaxed">
+                  We strictly access your calendar to fulfill your direct conversational commands. We never sell, rent, or trade your Google data to third parties, and you can revoke access at any time in your Google Account settings.
+                </p>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => navigateTo('privacy')}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-[#1d3557] bg-white border border-emerald-300 hover:bg-emerald-50 transition shadow-2xs"
+                >
+                  Privacy Policy
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateTo('terms')}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-[#1d3557] bg-white border border-emerald-300 hover:bg-emerald-50 transition shadow-2xs"
+                >
+                  Terms of Service
+                </button>
+              </div>
+            </div>
           </div>
 
           {/* PREFERENCES SECTION */}

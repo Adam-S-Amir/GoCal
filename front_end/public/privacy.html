@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy - GoCal &amp; Callie</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>
+    :root {
+      --primary: #1d3557;
+      --secondary: #457b9d;
+      --accent: #2a9d8f;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #1e293b;
+      --muted: #64748b;
+      --border: #e2e8f0;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      padding: 40px 20px;
+    }
+    .container {
+      max-width: 760px;
+      margin: 0 auto;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 40px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.04);
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 24px;
+      margin-bottom: 32px;
+    }
+    .logo-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .logo-img {
+      width: 36px;
+      height: 36px;
+      object-fit: contain;
+    }
+    .logo-text {
+      font-size: 24px;
+      font-weight: 800;
+      color: var(--primary);
+    }
+    .btn-back {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--primary);
+      text-decoration: none;
+      background: #f1f5f9;
+      padding: 8px 16px;
+      border-radius: 8px;
+      transition: background 0.15s ease;
+    }
+    .btn-back:hover {
+      background: #e2e8f0;
+    }
+    h1 {
+      font-size: 28px;
+      color: var(--primary);
+      margin-bottom: 8px;
+    }
+    .date-tag {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 24px;
+    }
+    h2 {
+      font-size: 18px;
+      color: var(--primary);
+      margin-top: 28px;
+      margin-bottom: 12px;
+    }
+    p {
+      margin-bottom: 16px;
+      font-size: 15px;
+    }
+    ul {
+      margin-left: 20px;
+      margin-bottom: 16px;
+      font-size: 15px;
+    }
+    li {
+      margin-bottom: 8px;
+    }
+    .highlight-box {
+      background: #ecfdf5;
+      border: 1px solid #a7f3d0;
+      border-radius: 12px;
+      padding: 16px;
+      margin: 20px 0;
+      color: #065f46;
+      font-size: 14px;
+    }
+    .footer {
+      margin-top: 40px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+      font-size: 13px;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .footer a {
+      color: var(--primary);
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="logo-group">
+        <img src="/GoCal-Logo.png" alt="GoCal Logo" class="logo-img" onerror="this.style.display='none'">
+        <span class="logo-text">GoCal</span>
+      </div>
+      <a href="/" class="btn-back">&larr; Back to GoCal</a>
+    </div>
+
+    <h1>Privacy Policy</h1>
+    <div class="date-tag">Last updated: October 13, 2026</div>
+
+    <div class="highlight-box">
+      <strong>Plain English Summary:</strong> GoCal and its AI companion Callie only access your Google Calendar to perform the direct actions you ask for (like checking your schedule, moving a class, or adding a study session). We never sell your data, never share it with advertisers, and you can disconnect at any time.
+    </div>
+
+    <h2>1. Introduction</h2>
+    <p>GoCal ("we", "our", or "the application") is a scheduling assistant application featuring Callie, designed to help students and busy professionals manage their agendas through conversational commands.</p>
+
+    <h2>2. Google User Data We Access</h2>
+    <p>When you choose to connect your Google Account with GoCal, we request access to the Google Calendar API (<code>https://www.googleapis.com/auth/calendar</code>). We access:</p>
+    <ul>
+      <li><strong>Calendar Events:</strong> Event titles, start and end times, and locations so Callie can read your schedule and check for open time slots.</li>
+      <li><strong>Basic Profile Info:</strong> Your email address and display name to identify your authenticated session.</li>
+    </ul>
+
+    <h2>3. How We Use Your Calendar Data</h2>
+    <p>Your calendar data is used strictly to deliver user-initiated scheduling functionality:</p>
+    <ul>
+      <li>Displaying your upcoming daily and weekly agenda when you ask "what's my schedule?".</li>
+      <li>Creating, rescheduling, or removing events when you explicitly command Callie to do so (e.g., "move Spanish to 8pm").</li>
+      <li>Analyzing schedule gaps to recommend free time windows for socializing or downtime.</li>
+    </ul>
+
+    <h2>4. Data Sharing and Protection</h2>
+    <p><strong>We do not sell, rent, or trade your Google Calendar data to any third parties.</strong></p>
+    <p>Your Google OAuth access tokens are stored in secure, encrypted, HTTP-only session cookies and are transmitted over HTTPS. We do not use your personal calendar data to train public AI models.</p>
+
+    <h2>5. Revoking Access and Data Deletion</h2>
+    <p>You have full control over your Google Account permissions. You can disconnect GoCal at any time by:</p>
+    <ul>
+      <li>Clicking "Sign Out" or "Disconnect" inside GoCal.</li>
+      <li>Visiting your <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener noreferrer">Google Account Security &amp; Permissions</a> page and revoking access for GoCal.</li>
+    </ul>
+
+    <h2>6. Contact Us</h2>
+    <p>If you have any questions or concerns regarding this Privacy Policy, please reach out via GitHub or through the developer contact info listed in the application.</p>
+
+    <div class="footer">
+      <div>&copy; 2026 GoCal. All rights reserved.</div>
+      <div>
+        <a href="/terms">Terms of Service</a> &bull; <a href="/">GoCal Home</a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
