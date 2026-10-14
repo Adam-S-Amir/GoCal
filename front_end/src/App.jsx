@@ -3,21 +3,19 @@ import React, { useState, useRef, useEffect } from "react";
 // Determine API base URL dynamically
 const getApiBaseUrl = () => {
   if (typeof window !== "undefined") {
-    // If running on custom domain or render, use relative path if proxied, or env var
+    // 1. Explicit env variable
     if (import.meta.env?.VITE_API_URL) {
       return import.meta.env.VITE_API_URL.replace(/\/$/, "");
     }
-    // Default to relative /api (works when frontend proxies backend or same domain)
-    // If backend is on another Render domain (e.g. gocal.onrender.com), fallback:
     const hostname = window.location.hostname;
-    if (hostname.includes("onrender.com")) {
-      return "https://gocal.onrender.com";
-    }
+    // 2. Local development
     if (hostname === "localhost" || hostname === "127.0.0.1") {
       return "http://localhost:5000";
     }
+    // 3. Production backend (Render) for gocal.us, gocal-front.onrender.com, etc.
+    return "https://gocal.onrender.com";
   }
-  return "";
+  return "https://gocal.onrender.com";
 };
 
 function App() {
@@ -84,6 +82,8 @@ function App() {
         type: "success",
         message: "Google Calendar successfully connected! Callie is now synced with your calendar."
       });
+      setAuthStatus({ authenticated: true, user: null });
+      setCurrentScreen("chat");
       window.history.replaceState({}, document.title, window.location.pathname);
     } else if (authParam === "error") {
       setAuthNotification({
@@ -94,24 +94,11 @@ function App() {
     }
   }, []);
 
-  // Initiate Google OAuth login
-  const handleGoogleLogin = async () => {
-    try {
-      const baseUrl = getApiBaseUrl();
-      const res = await fetch(`${baseUrl}/api/auth/url`, { credentials: "include" });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.authUrl) {
-          window.location.href = data.authUrl;
-          return;
-        }
-      }
-      // Fallback direct login endpoint
-      window.location.href = `${baseUrl}/login`;
-    } catch (err) {
-      const baseUrl = getApiBaseUrl();
-      window.location.href = `${baseUrl}/login`;
-    }
+  // Initiate Google OAuth login directly through Flask backend
+  const handleGoogleLogin = () => {
+    const baseUrl = getApiBaseUrl();
+    const currentOrigin = window.location.origin;
+    window.location.href = `${baseUrl}/login?redirect_to=${encodeURIComponent(currentOrigin)}`;
   };
 
   // Connects to Flask backend

@@ -1,4 +1,5 @@
-# SPA fallback for static hosting
+# Render static hosting redirect rules
+/login https://gocal.onrender.com/login 302!
 /privacy /privacy/index.html 200
 /terms /terms/index.html 200
 /* /index.html 200
