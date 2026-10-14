@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect } from "react";
 
 // Determine API base URL dynamically
+// Determine API base URL dynamically
 const getApiBaseUrl = () => {
   if (typeof window !== "undefined") {
-    // 1. Explicit env variable
+    // 1. Explicit env variable (optional)
     if (import.meta.env?.VITE_API_URL) {
       return import.meta.env.VITE_API_URL.replace(/\/$/, "");
     }
@@ -12,14 +13,10 @@ const getApiBaseUrl = () => {
     if (hostname === "localhost" || hostname === "127.0.0.1") {
       return "http://localhost:5000";
     }
-    // 3. Production backend for gocal.us
-    if (hostname.endsWith("gocal.us")) {
-      return "https://api.gocal.us";
-    }
-    // 4. Fallback backend
-    return "https://api.gocal.us";
+    // 3. Direct Render Backend (no api subdomain required)
+    return "https://gocal.onrender.com";
   }
-  return "https://api.gocal.us";
+  return "https://gocal.onrender.com";
 };
 
 function App() {
