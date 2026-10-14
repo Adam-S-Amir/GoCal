@@ -12,10 +12,14 @@ const getApiBaseUrl = () => {
     if (hostname === "localhost" || hostname === "127.0.0.1") {
       return "http://localhost:5000";
     }
-    // 3. Production backend (Render) for gocal.us, gocal-front.onrender.com, etc.
-    return "https://gocal.onrender.com";
+    // 3. Production backend for gocal.us
+    if (hostname.endsWith("gocal.us")) {
+      return "https://api.gocal.us";
+    }
+    // 4. Fallback backend
+    return "https://api.gocal.us";
   }
-  return "https://gocal.onrender.com";
+  return "https://api.gocal.us";
 };
 
 function App() {
@@ -92,6 +96,25 @@ function App() {
       });
       window.history.replaceState({}, document.title, window.location.pathname);
     }
+
+    // Check existing auth session on mount
+    const checkAuthStatus = async () => {
+      try {
+        const baseUrl = getApiBaseUrl();
+        const res = await fetch(`${baseUrl}/api/auth/status`, {
+          credentials: "include"
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.authenticated) {
+            setAuthStatus({ authenticated: true, user: null });
+          }
+        }
+      } catch (err) {
+        // Backend temporarily unavailable or not yet logged in
+      }
+    };
+    checkAuthStatus();
   }, []);
 
   // Initiate Google OAuth login directly through Flask backend

@@ -14,11 +14,12 @@ from ai_assistant import process_prompt
 load_dotenv()
 
 # ==============================================================================
-# SERVER-SIDE SESSION ENGINE (FIXES 4096-BYTE COOKIE OVERFLOW & CSRF MISMATCH)
+# SERVER-SIDE SESSION ENGINE (CRITICAL FIX FOR 4096-BYTE COOKIE OVERFLOW)
 # ==============================================================================
-# Browser cookies have a strict 4093-byte limit. Tokens, code verifiers, and
-# chat history exceed 4KB, causing Chrome/Opera/Safari to drop the cookie.
-# This server session interface stores data in /tmp/flask_sessions and sets only
+# Flask's default client cookie session has a strict 4093-byte browser limit.
+# Google OAuth tokens, code_verifiers, and chat history quickly exceed 4096 bytes,
+# causing browsers (Chrome, Opera, Safari) to silently drop the cookie.
+# This server session interface stores data in /tmp/flask_sessions and only sets
 # a tiny 36-byte UUID cookie in the browser, permanently eliminating dropped cookies.
 class SimpleServerSession(dict, SessionMixin):
     def __init__(self, initial=None, sid=None):
@@ -50,7 +51,7 @@ class ServerSessionInterface(SessionInterface):
     def save_session(self, app, session, response):
         cookie_name = app.config.get("SESSION_COOKIE_NAME", "session")
         
-        # Share cookie between api.gocal.us and gocal.us
+        # Calculate domain: share cookie between api.gocal.us and gocal.us
         host = request.host.split(":")[0].lower()
         if host.endswith("gocal.us"):
             domain = ".gocal.us"
@@ -79,7 +80,7 @@ class ServerSessionInterface(SessionInterface):
         response.set_cookie(
             cookie_name,
             session.sid,
-            max_age=30 * 86400,
+            max_age=30 * 86400,  # 30 days
             httponly=True,
             domain=domain,
             path=path,
@@ -91,10 +92,13 @@ app = Flask(__name__)
 app.secret_key = os.getenv("SESSION_SECRET", "super_secret_dev_key_change_in_production")
 app.session_interface = ServerSessionInterface()
 
-# Reverse proxy fix: Essential for Render HTTPS termination
+# Fix reverse proxy headers (CRITICAL on Render, Cloud Run, Heroku)
+# This ensures request.scheme and request.url accurately reflect https://
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
 
-# Cookie configuration for cross-site Google OAuth
+# CRITICAL FOR CLOUD / RENDER AUTH:
+# When Google redirects back cross-site from accounts.google.com,
+# SameSite must be 'None' and Secure must be True so cookies are NOT dropped.
 app.config.update(
     SESSION_COOKIE_SAMESITE="None",
     SESSION_COOKIE_SECURE=True,
@@ -135,13 +139,15 @@ def home():
 
 @app.route('/login')
 def login():
+    # Save the return destination passed by frontend (e.g. /login?redirect_to=https://gocal.us)
     redirect_to = request.args.get('redirect_to')
     if redirect_to:
         session['redirect_to'] = redirect_to
     elif request.referrer and 'google.com' not in request.referrer:
         session['redirect_to'] = request.referrer
 
-    flow = get_oauth_flow(redirect_uri=get_effective_redirect_uri())
+    redirect_uri = get_effective_redirect_uri()
+    flow = get_oauth_flow(redirect_uri=redirect_uri)
     auth_url, state = flow.authorization_url(
         access_type='offline',
         prompt='consent',
@@ -173,9 +179,13 @@ def auth_url():
 def callback():
     state_in_session = session.get('state')
     state_in_req = request.args.get('state')
+    
+    # Resilient state recovery: if browser cookie was dropped or refreshed,
+    # fall back to request state so flow.fetch_token does not crash on mismatch
     effective_state = state_in_session or state_in_req
     redirect_uri = get_effective_redirect_uri()
 
+    # Reconstruct request URL with https if terminated by reverse proxy
     auth_response_url = request.url
     if request.headers.get('X-Forwarded-Proto') == 'https' and auth_response_url.startswith('http://'):
         auth_response_url = auth_response_url.replace('http://', 'https://', 1)
@@ -285,8 +295,11 @@ def chat():
     try:
         history = session.get('chat_history', [])
         ai_response, history = process_prompt(user_message, session['tokens'], history)
+        
+        # Keep chat history capped to last 12 exchanges to prevent unbounded memory growth
         if len(history) > 24:
             history = history[-24:]
+            
         session['chat_history'] = history
         return jsonify({'reply': ai_response})
     except Exception as e:
